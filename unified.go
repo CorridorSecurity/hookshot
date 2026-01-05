@@ -122,14 +122,16 @@ type ExecutionContext struct {
 	Platform Platform
 	Type     ExecutionType
 
-	// For shell execution
-	Command string // The shell command (Cursor beforeShellExecution, Claude Code Bash tool)
+	// For shell execution (Cursor beforeShellExecution, Claude Code Bash tool)
+	// Also used for local MCP servers on Cursor (command-based MCP servers)
+	// NOTE: Only populated for Cursor, not Claude Code
+	Command string
 	Cwd     string // Working directory
 
 	// For MCP execution
 	ToolName  string          // MCP tool name (e.g., "mcp__server__tool")
 	ToolInput json.RawMessage // Tool input parameters as JSON
-	ServerURL string          // MCP server URL (Cursor only)
+	ServerURL string          // MCP server URL (Cursor only, for URL-based servers)
 
 	// Raw input for advanced use cases
 	RawClaudeCode *claude.PreToolUseInput
@@ -265,6 +267,7 @@ func OnBeforeExecution(handler ExecutionHandler) {
 				ToolName:  input.ToolName,
 				ToolInput: json.RawMessage(input.ToolInput),
 				ServerURL: input.URL,
+				Command:   input.Command, // For local MCP servers (command-based)
 				RawCursor: &input,
 			}
 
