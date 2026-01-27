@@ -3,8 +3,10 @@ package hookshot
 import (
 	"encoding/json"
 
+	"github.com/CorridorSecurity/hookshot/cascade"
 	"github.com/CorridorSecurity/hookshot/claude"
 	"github.com/CorridorSecurity/hookshot/cursor"
+	"github.com/CorridorSecurity/hookshot/droid"
 	"github.com/CorridorSecurity/hookshot/internal"
 )
 
@@ -12,8 +14,10 @@ import (
 type Platform string
 
 const (
-	PlatformClaude Platform = "claude"
-	PlatformCursor Platform = "cursor"
+	PlatformClaude  Platform = "claude"
+	PlatformCursor  Platform = "cursor"
+	PlatformDroid   Platform = "droid"
+	PlatformCascade Platform = "cascade"
 )
 
 // =============================================================================
@@ -35,12 +39,17 @@ type StopContext struct {
 }
 
 // ShouldSkip returns true if the stop hook should be skipped to prevent loops.
-// For Claude Code, this checks StopHookActive. For Cursor, this checks LoopCount >= 3.
+// For Claude Code and Droid, this checks StopHookActive. For Cursor, this checks LoopCount >= 3.
+// For Cascade, there is no loop prevention mechanism (returns false).
 func (c StopContext) ShouldSkip() bool {
-	if c.Platform == PlatformClaude {
+	if c.Platform == PlatformClaude || c.Platform == PlatformDroid {
 		return c.StopHookActive
 	}
-	return c.LoopCount >= 3
+	if c.Platform == PlatformCursor {
+		return c.LoopCount >= 3
+	}
+	// Cascade has no loop prevention mechanism
+	return false
 }
 
 // StopDecision represents the unified decision for stop hooks.
@@ -68,8 +77,9 @@ func PreventStop(message string) StopDecision {
 // StopHandler is the function signature for unified stop handlers.
 type StopHandler func(StopContext) StopDecision
 
-// OnStop registers a unified handler for stop events on both platforms.
-// It automatically registers handlers for "claude-stop" and "cursor-stop".
+// OnStop registers a unified handler for stop events on all platforms.
+// It automatically registers handlers for "claude-stop", "cursor-stop",
+// "droid-stop", and "cascade-post-cascade-response".
 func OnStop(handler StopHandler) {
 	Register("claude-stop", func() {
 		Run(func(input claude.StopInput) claude.StopOutput {
@@ -102,6 +112,36 @@ func OnStop(handler StopHandler) {
 			return cursor.Followup(decision.Message)
 		})
 	})
+
+	Register("droid-stop", func() {
+		Run(func(input droid.StopInput) droid.StopOutput {
+			ctx := StopContext{
+				Platform:       PlatformDroid,
+				SessionID:      input.SessionID,
+				Cwd:            input.Cwd,
+				StopHookActive: input.StopHookActive,
+			}
+			decision := handler(ctx)
+			if decision.Continue {
+				return droid.Continue()
+			}
+			return droid.Block(decision.Message)
+		})
+	})
+
+	// Cascade uses post_cascade_response as the closest equivalent to stop hooks
+	Register("cascade-post-cascade-response", func() {
+		Run(func(input cascade.PostCascadeResponseInput) cascade.PostCascadeResponseOutput {
+			ctx := StopContext{
+				Platform:  PlatformCascade,
+				SessionID: input.TrajectoryID,
+			}
+			// Cascade post hooks are fire-and-forget, but we still call the handler
+			// for side effects (logging, telemetry, etc.)
+			handler(ctx)
+			return cascade.PostCascadeResponseOK()
+		})
+	})
 }
 
 // =============================================================================
@@ -124,18 +164,20 @@ type ExecutionContext struct {
 
 	// For shell execution (Cursor beforeShellExecution, Claude Code Bash tool)
 	// Also used for local MCP servers on Cursor (command-based MCP servers)
-	// NOTE: Only populated for Cursor, not Claude Code
+	// NOTE: Only populated for Cursor and Cascade, not Claude Code or Droid
 	Command string
 	Cwd     string // Working directory
 
 	// For MCP execution
 	ToolName  string          // MCP tool name (e.g., "mcp__server__tool")
 	ToolInput json.RawMessage // Tool input parameters as JSON
-	ServerURL string          // MCP server URL (Cursor only, for URL-based servers)
+	ServerURL string          // MCP server URL (Cursor/Cascade only, for URL-based servers)
 
 	// Raw input for advanced use cases
 	RawClaudeCode *claude.PreToolUseInput
 	RawCursor     any // *cursor.BeforeShellExecutionInput or *cursor.BeforeMCPExecutionInput
+	RawDroid      *droid.PreToolUseInput
+	RawCascade    any // *cascade.PreRunCommandInput or *cascade.PreMCPToolUseInput
 }
 
 // IsMCP returns true if this is an MCP tool execution.
@@ -185,6 +227,9 @@ type ExecutionHandler func(ExecutionContext) ExecutionDecision
 //   - "claude-pre-tool-use" (filters to Bash and mcp__* tools)
 //   - "cursor-before-shell"
 //   - "cursor-before-mcp"
+//   - "droid-pre-tool-use" (filters to Bash and mcp__* tools)
+//   - "cascade-pre-run-command"
+//   - "cascade-pre-mcp-tool-use"
 func OnBeforeExecution(handler ExecutionHandler) {
 	// Claude Code PreToolUse (for Bash and MCP tools)
 	Register("claude-pre-tool-use", func() {
@@ -284,6 +329,98 @@ func OnBeforeExecution(handler ExecutionHandler) {
 			return cursor.Deny(decision.Reason, decision.Reason)
 		})
 	})
+
+	// Droid PreToolUse (for Bash and MCP tools)
+	Register("droid-pre-tool-use", func() {
+		Run(func(input droid.PreToolUseInput) droid.PreToolUseOutput {
+			// Determine execution type
+			var execType ExecutionType
+			if input.ToolName == "Bash" {
+				execType = ExecutionShell
+			} else if len(input.ToolName) > 5 && input.ToolName[:5] == "mcp__" {
+				execType = ExecutionMCP
+			} else {
+				execType = ExecutionTool
+			}
+
+			// Extract command for Bash tool
+			var command string
+			if execType == ExecutionShell {
+				var bashInput struct {
+					Command string `json:"command"`
+				}
+				json.Unmarshal(input.ToolInput, &bashInput)
+				command = bashInput.Command
+			}
+
+			ctx := ExecutionContext{
+				Platform:  PlatformDroid,
+				Type:      execType,
+				Command:   command,
+				Cwd:       input.Cwd,
+				ToolName:  input.ToolName,
+				ToolInput: input.ToolInput,
+				RawDroid:  &input,
+			}
+
+			decision := handler(ctx)
+			if decision.Allow {
+				if decision.Reason != "" {
+					return droid.Allow(decision.Reason)
+				}
+				return droid.AllowSilent()
+			}
+			if decision.Ask {
+				return droid.Ask(decision.Reason)
+			}
+			return droid.Deny(decision.Reason)
+		})
+	})
+
+	// Cascade preRunCommand
+	Register("cascade-pre-run-command", func() {
+		Run(func(input cascade.PreRunCommandInput) cascade.PreRunCommandOutput {
+			ctx := ExecutionContext{
+				Platform:   PlatformCascade,
+				Type:       ExecutionShell,
+				Command:    input.ToolInfo.CommandLine,
+				Cwd:        input.ToolInfo.Cwd,
+				RawCascade: &input,
+			}
+
+			decision := handler(ctx)
+			if decision.Allow {
+				return cascade.AllowCommand()
+			}
+			if decision.Ask {
+				return cascade.AskCommand(decision.Reason)
+			}
+			return cascade.DenyCommand(decision.Reason)
+		})
+	})
+
+	// Cascade preMCPToolUse
+	Register("cascade-pre-mcp-tool-use", func() {
+		Run(func(input cascade.PreMCPToolUseInput) cascade.PreMCPToolUseOutput {
+			ctx := ExecutionContext{
+				Platform:   PlatformCascade,
+				Type:       ExecutionMCP,
+				ToolName:   input.ToolInfo.ToolName,
+				ToolInput:  json.RawMessage(input.ToolInfo.ToolInput),
+				ServerURL:  input.ToolInfo.ServerURL,
+				RawCascade: &input,
+			}
+
+			decision := handler(ctx)
+			if decision.Allow {
+				return cascade.AllowMCP()
+			}
+			if decision.Ask {
+				return cascade.AskMCP(decision.Reason)
+			}
+			return cascade.DenyMCP(decision.Reason)
+		})
+	})
 }
 
 // =============================================================================
@@ -299,7 +436,7 @@ type FileEdit struct {
 // FileEditContext provides a unified view of file edit events.
 type FileEditContext struct {
 	Platform  Platform
-	SessionID string // Claude Code: session_id, Cursor: conversation_id
+	SessionID string // Claude Code: session_id, Cursor: conversation_id, Cascade: trajectory_id
 	FilePath  string
 	Edits     []FileEdit
 	Cwd       string
@@ -307,6 +444,8 @@ type FileEditContext struct {
 	// Raw input for advanced use cases
 	RawClaudeCode *claude.PostToolUseInput
 	RawCursor     *cursor.AfterFileEditInput
+	RawDroid      *droid.PostToolUseInput
+	RawCascade    *cascade.PostWriteCodeInput
 }
 
 // FileEditDecision represents the unified decision for file edit hooks.
@@ -343,6 +482,8 @@ type FileEditHandler func(FileEditContext) FileEditDecision
 // It automatically registers handlers for:
 //   - "claude-after-file-edit" (PostToolUse for Write/Edit)
 //   - "cursor-after-file-edit"
+//   - "droid-after-file-edit" (PostToolUse for Write/Edit)
+//   - "cascade-post-write-code"
 func OnAfterFileEdit(handler FileEditHandler) {
 	// Claude Code PostToolUse (for Write/Edit)
 	Register("claude-after-file-edit", func() {
@@ -410,6 +551,70 @@ func OnAfterFileEdit(handler FileEditHandler) {
 			return cursor.AfterFileEditOK()
 		})
 	})
+
+	// Droid PostToolUse (for Write/Edit)
+	Register("droid-after-file-edit", func() {
+		Run(func(input droid.PostToolUseInput) droid.PostToolUseOutput {
+			// Only handle Write and Edit tools
+			if input.ToolName != "Write" && input.ToolName != "Edit" {
+				return droid.PostToolOK()
+			}
+
+			// Extract file path and edits from tool input
+			var toolInput struct {
+				FilePath  string `json:"file_path"`
+				Content   string `json:"content"`
+				OldString string `json:"old_string"`
+				NewString string `json:"new_string"`
+			}
+			json.Unmarshal(input.ToolInput, &toolInput)
+
+			var edits []FileEdit
+			if input.ToolName == "Edit" {
+				edits = []FileEdit{{OldString: toolInput.OldString, NewString: toolInput.NewString}}
+			} else {
+				edits = []FileEdit{{OldString: "", NewString: toolInput.Content}}
+			}
+
+			ctx := FileEditContext{
+				Platform:  PlatformDroid,
+				SessionID: input.SessionID,
+				FilePath:  toolInput.FilePath,
+				Edits:     edits,
+				Cwd:       input.Cwd,
+				RawDroid:  &input,
+			}
+
+			decision := handler(ctx)
+			if decision.Block {
+				return droid.PostToolBlock(decision.Reason)
+			}
+			if decision.Context != "" {
+				return droid.PostToolContext(decision.Context)
+			}
+			return droid.PostToolOK()
+		})
+	})
+
+	// Cascade postWriteCode
+	Register("cascade-post-write-code", func() {
+		Run(func(input cascade.PostWriteCodeInput) cascade.PostWriteCodeOutput {
+			edits := []FileEdit{{OldString: "", NewString: input.ToolInfo.Content}}
+
+			ctx := FileEditContext{
+				Platform:   PlatformCascade,
+				SessionID:  input.TrajectoryID,
+				FilePath:   input.ToolInfo.FilePath,
+				Edits:      edits,
+				RawCascade: &input,
+			}
+
+			// Cascade post hooks are fire-and-forget, but we still call the handler
+			// for side effects (logging, telemetry, etc.)
+			handler(ctx)
+			return cascade.PostWriteCodeOK()
+		})
+	})
 }
 
 // =============================================================================
@@ -419,12 +624,14 @@ func OnAfterFileEdit(handler FileEditHandler) {
 // PromptContext provides a unified view of prompt submission events.
 type PromptContext struct {
 	Platform  Platform
-	SessionID string // Claude Code: session_id, Cursor: conversation_id
+	SessionID string // Claude Code: session_id, Cursor: conversation_id, Cascade: trajectory_id
 	Prompt    string
 
 	// Raw input for advanced use cases
 	RawClaudeCode *claude.UserPromptSubmitInput
 	RawCursor     *cursor.BeforeSubmitPromptInput
+	RawDroid      *droid.UserPromptSubmitInput
+	RawCascade    *cascade.PreUserPromptInput
 }
 
 // PromptDecision represents the unified decision for prompt hooks.
@@ -461,6 +668,8 @@ type PromptHandler func(PromptContext) PromptDecision
 // It automatically registers handlers for:
 //   - "claude-user-prompt-submit"
 //   - "cursor-before-submit-prompt"
+//   - "droid-user-prompt-submit"
+//   - "cascade-pre-user-prompt"
 func OnPromptSubmit(handler PromptHandler) {
 	// Claude Code UserPromptSubmit
 	Register("claude-user-prompt-submit", func() {
@@ -498,6 +707,45 @@ func OnPromptSubmit(handler PromptHandler) {
 				return cursor.BlockPrompt(decision.Reason)
 			}
 			return cursor.AllowPrompt()
+		})
+	})
+
+	// Droid UserPromptSubmit
+	Register("droid-user-prompt-submit", func() {
+		Run(func(input droid.UserPromptSubmitInput) droid.UserPromptSubmitOutput {
+			ctx := PromptContext{
+				Platform:  PlatformDroid,
+				SessionID: input.SessionID,
+				Prompt:    input.Prompt,
+				RawDroid:  &input,
+			}
+
+			decision := handler(ctx)
+			if !decision.Allow {
+				return droid.BlockPrompt(decision.Reason)
+			}
+			if decision.Context != "" {
+				return droid.AddContext(decision.Context)
+			}
+			return droid.AllowPrompt()
+		})
+	})
+
+	// Cascade preUserPrompt
+	Register("cascade-pre-user-prompt", func() {
+		Run(func(input cascade.PreUserPromptInput) cascade.PreUserPromptOutput {
+			ctx := PromptContext{
+				Platform:   PlatformCascade,
+				SessionID:  input.TrajectoryID,
+				Prompt:     input.ToolInfo.Prompt,
+				RawCascade: &input,
+			}
+
+			decision := handler(ctx)
+			if !decision.Allow {
+				return cascade.BlockPrompt(decision.Reason)
+			}
+			return cascade.AllowPrompt()
 		})
 	})
 }

@@ -56,7 +56,7 @@ Usage:
 
 Commands:
   build     Build hooks binary for one or more platforms
-  install   Install hooks to Cursor and/or Claude Code config files
+  install   Install hooks to AI coding agent config files (Claude Code, Cursor, Droid, Cascade)
 
 Run 'hookshot <command> -h' for command-specific help.`)
 }
@@ -199,25 +199,31 @@ func runInstall(args []string) {
 	fs := flag.NewFlagSet("install", flag.ExitOnError)
 
 	var (
-		binaryPath string
-		claude     bool
-		cursor     bool
+		binaryPath    string
+		claudeFlag    bool
+		cursorFlag    bool
+		droidFlag     bool
+		cascadeFlag   bool
 	)
 
 	fs.StringVar(&binaryPath, "binary", "", "Path to hooks binary (required)")
-	fs.BoolVar(&claude, "claude", false, "Install to Claude Code only")
-	fs.BoolVar(&cursor, "cursor", false, "Install to Cursor only")
+	fs.BoolVar(&claudeFlag, "claude", false, "Install to Claude Code only")
+	fs.BoolVar(&cursorFlag, "cursor", false, "Install to Cursor only")
+	fs.BoolVar(&droidFlag, "droid", false, "Install to Factory Droid only")
+	fs.BoolVar(&cascadeFlag, "cascade", false, "Install to Windsurf Cascade only")
 
 	fs.Usage = func() {
-		fmt.Println(`Install hooks to Cursor and/or Claude Code config files.
+		fmt.Println(`Install hooks to AI coding agent config files.
 
 Usage:
   hookshot install --binary <path> [flags]
 
 Examples:
-  hookshot install --binary ./my-hooks          # Install to both
-  hookshot install --binary ./my-hooks --claude # Claude only
-  hookshot install --binary ./my-hooks --cursor # Cursor only
+  hookshot install --binary ./my-hooks            # Install to all platforms
+  hookshot install --binary ./my-hooks --claude   # Claude Code only
+  hookshot install --binary ./my-hooks --cursor   # Cursor only
+  hookshot install --binary ./my-hooks --droid    # Factory Droid only
+  hookshot install --binary ./my-hooks --cascade  # Windsurf Cascade only
 
 Flags:`)
 		fs.PrintDefaults()
@@ -244,22 +250,38 @@ Flags:`)
 		os.Exit(1)
 	}
 
-	// If neither specified, install to both
-	if !claude && !cursor {
-		claude = true
-		cursor = true
+	// If none specified, install to all
+	if !claudeFlag && !cursorFlag && !droidFlag && !cascadeFlag {
+		claudeFlag = true
+		cursorFlag = true
+		droidFlag = true
+		cascadeFlag = true
 	}
 
-	if claude {
+	if claudeFlag {
 		if err := installClaude(absPath); err != nil {
 			fmt.Fprintf(os.Stderr, "Error installing to Claude Code: %v\n", err)
 			os.Exit(1)
 		}
 	}
 
-	if cursor {
+	if cursorFlag {
 		if err := installCursor(absPath); err != nil {
 			fmt.Fprintf(os.Stderr, "Error installing to Cursor: %v\n", err)
+			os.Exit(1)
+		}
+	}
+
+	if droidFlag {
+		if err := installDroid(absPath); err != nil {
+			fmt.Fprintf(os.Stderr, "Error installing to Factory Droid: %v\n", err)
+			os.Exit(1)
+		}
+	}
+
+	if cascadeFlag {
+		if err := installCascade(absPath); err != nil {
+			fmt.Fprintf(os.Stderr, "Error installing to Windsurf Cascade: %v\n", err)
 			os.Exit(1)
 		}
 	}
@@ -364,5 +386,104 @@ func installCursor(binaryPath string) error {
 	}
 
 	fmt.Println("  Installed hooks: stop, beforeShellExecution, beforeMCPExecution, afterFileEdit, beforeSubmitPrompt")
+	return nil
+}
+
+func installDroid(binaryPath string) error {
+	homeDir, _ := os.UserHomeDir()
+	configPath := filepath.Join(homeDir, ".factory", "settings.json")
+
+	fmt.Printf("Installing to Factory Droid (%s)...\n", configPath)
+
+	// Read existing config or create new
+	var config map[string]any
+	data, err := os.ReadFile(configPath)
+	if err == nil {
+		json.Unmarshal(data, &config)
+	}
+	if config == nil {
+		config = make(map[string]any)
+	}
+
+	// Build hooks config (same structure as Claude Code)
+	hooks := map[string]any{
+		"Stop": []map[string]any{{
+			"hooks": []map[string]any{{
+				"type":    "command",
+				"command": binaryPath + " droid-stop",
+			}},
+		}},
+		"PreToolUse": []map[string]any{{
+			"matcher": "*",
+			"hooks": []map[string]any{{
+				"type":    "command",
+				"command": binaryPath + " droid-pre-tool-use",
+			}},
+		}},
+		"PostToolUse": []map[string]any{{
+			"matcher": "Write|Edit",
+			"hooks": []map[string]any{{
+				"type":    "command",
+				"command": binaryPath + " droid-after-file-edit",
+			}},
+		}},
+		"UserPromptSubmit": []map[string]any{{
+			"hooks": []map[string]any{{
+				"type":    "command",
+				"command": binaryPath + " droid-user-prompt-submit",
+			}},
+		}},
+	}
+
+	config["hooks"] = hooks
+
+	// Ensure directory exists
+	os.MkdirAll(filepath.Dir(configPath), 0755)
+
+	// Write config
+	output, err := json.MarshalIndent(config, "", "  ")
+	if err != nil {
+		return err
+	}
+
+	if err := os.WriteFile(configPath, output, 0644); err != nil {
+		return err
+	}
+
+	fmt.Println("  Installed hooks: Stop, PreToolUse, PostToolUse, UserPromptSubmit")
+	return nil
+}
+
+func installCascade(binaryPath string) error {
+	homeDir, _ := os.UserHomeDir()
+	configPath := filepath.Join(homeDir, ".codeium", "windsurf", "hooks.json")
+
+	fmt.Printf("Installing to Windsurf Cascade (%s)...\n", configPath)
+
+	// Build hooks config
+	config := map[string]any{
+		"hooks": map[string]any{
+			"pre_run_command":         []map[string]any{{"command": binaryPath + " cascade-pre-run-command"}},
+			"pre_mcp_tool_use":        []map[string]any{{"command": binaryPath + " cascade-pre-mcp-tool-use"}},
+			"pre_user_prompt":         []map[string]any{{"command": binaryPath + " cascade-pre-user-prompt"}},
+			"post_write_code":         []map[string]any{{"command": binaryPath + " cascade-post-write-code"}},
+			"post_cascade_response":   []map[string]any{{"command": binaryPath + " cascade-post-cascade-response"}},
+		},
+	}
+
+	// Ensure directory exists
+	os.MkdirAll(filepath.Dir(configPath), 0755)
+
+	// Write config
+	output, err := json.MarshalIndent(config, "", "  ")
+	if err != nil {
+		return err
+	}
+
+	if err := os.WriteFile(configPath, output, 0644); err != nil {
+		return err
+	}
+
+	fmt.Println("  Installed hooks: pre_run_command, pre_mcp_tool_use, pre_user_prompt, post_write_code, post_cascade_response")
 	return nil
 }
