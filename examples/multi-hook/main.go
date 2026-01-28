@@ -203,35 +203,36 @@ func handleCursorBeforeTabRead() {
 
 // =============================================================================
 // PLATFORM-SPECIFIC: Windsurf Cascade
+// Cascade uses exit code 2 to block actions, so we use RunE with errors
 // =============================================================================
 
 func handleCascadePreRunCommand() {
-	hookshot.Run(func(input cascade.PreRunCommandInput) cascade.PreRunCommandOutput {
+	hookshot.RunE(func(input cascade.PreRunCommandInput) (cascade.PreRunCommandOutput, error) {
 		// Block dangerous shell commands
 		if strings.Contains(input.ToolInfo.CommandLine, "rm -rf /") {
-			return cascade.DenyCommand("Dangerous command blocked")
+			return cascade.PreRunCommandOutput{}, fmt.Errorf("Dangerous command blocked")
 		}
-		return cascade.AllowCommand()
+		return cascade.AllowCommand(), nil
 	})
 }
 
 func handleCascadePreWriteCode() {
-	hookshot.Run(func(input cascade.PreWriteCodeInput) cascade.PreWriteCodeOutput {
+	hookshot.RunE(func(input cascade.PreWriteCodeInput) (cascade.PreWriteCodeOutput, error) {
 		// Block writes to sensitive files
 		if strings.HasSuffix(input.ToolInfo.FilePath, ".env") {
-			return cascade.DenyWrite("Cannot write to .env files")
+			return cascade.PreWriteCodeOutput{}, fmt.Errorf("Cannot write to .env files")
 		}
-		return cascade.AllowWrite()
+		return cascade.AllowWrite(), nil
 	})
 }
 
 func handleCascadePreUserPrompt() {
-	hookshot.Run(func(input cascade.PreUserPromptInput) cascade.PreUserPromptOutput {
+	hookshot.RunE(func(input cascade.PreUserPromptInput) (cascade.PreUserPromptOutput, error) {
 		// Block prompts with API keys
 		if strings.Contains(strings.ToLower(input.ToolInfo.Prompt), "api_key=") {
-			return cascade.BlockPrompt("Don't include API keys in prompts")
+			return cascade.PreUserPromptOutput{}, fmt.Errorf("Don't include API keys in prompts")
 		}
-		return cascade.AllowPrompt()
+		return cascade.AllowPrompt(), nil
 	})
 }
 
