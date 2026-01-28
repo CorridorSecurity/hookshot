@@ -1,252 +1,111 @@
 package droid
 
+import "github.com/CorridorSecurity/hookshot/claude"
+
 // =============================================================================
-// Stop / SubagentStop Helpers
+// Stop / SubagentStop Helpers (re-exported from claude)
 // =============================================================================
 
 // Continue allows Droid to stop normally.
-func Continue() StopOutput {
-	return StopOutput{}
-}
+var Continue = claude.Continue
 
 // Block prevents Droid from stopping and sends a message.
-func Block(reason string) StopOutput {
-	return StopOutput{
-		Decision: "block",
-		Reason:   reason,
-	}
-}
+var Block = claude.Block
 
 // StopWith creates a StopOutput that halts Droid entirely.
-func StopWith(reason string) StopOutput {
-	cont := false
-	return StopOutput{
-		BaseOutput: BaseOutput{
-			Continue:   &cont,
-			StopReason: reason,
-		},
-	}
-}
+var StopWith = claude.StopWith
 
 // =============================================================================
-// PreToolUse Helpers
+// PreToolUse Helpers (re-exported from claude)
 // =============================================================================
 
 // Allow permits the tool to execute without asking the user.
-func Allow(reason string) PreToolUseOutput {
-	return PreToolUseOutput{
-		HookSpecificOutput: &PreToolUseHookOutput{
-			HookEventName:            "PreToolUse",
-			PermissionDecision:       "allow",
-			PermissionDecisionReason: reason,
-		},
-	}
-}
+var Allow = claude.Allow
 
 // AllowSilent permits the tool to execute without showing output.
-func AllowSilent() PreToolUseOutput {
-	return PreToolUseOutput{
-		BaseOutput: BaseOutput{
-			SuppressOutput: true,
-		},
-		HookSpecificOutput: &PreToolUseHookOutput{
-			HookEventName:      "PreToolUse",
-			PermissionDecision: "allow",
-		},
-	}
-}
+var AllowSilent = claude.AllowSilent
 
 // AllowWithInput permits the tool with modified input parameters.
-func AllowWithInput(reason string, updatedInput map[string]any) PreToolUseOutput {
-	return PreToolUseOutput{
-		HookSpecificOutput: &PreToolUseHookOutput{
-			HookEventName:            "PreToolUse",
-			PermissionDecision:       "allow",
-			PermissionDecisionReason: reason,
-			UpdatedInput:             updatedInput,
-		},
-	}
-}
+var AllowWithInput = claude.AllowWithInput
 
 // Deny blocks the tool from executing.
-func Deny(reason string) PreToolUseOutput {
-	return PreToolUseOutput{
-		HookSpecificOutput: &PreToolUseHookOutput{
-			HookEventName:            "PreToolUse",
-			PermissionDecision:       "deny",
-			PermissionDecisionReason: reason,
-		},
-	}
-}
+var Deny = claude.Deny
 
 // Ask prompts the user to confirm the tool execution.
-func Ask(reason string) PreToolUseOutput {
-	return PreToolUseOutput{
-		HookSpecificOutput: &PreToolUseHookOutput{
-			HookEventName:            "PreToolUse",
-			PermissionDecision:       "ask",
-			PermissionDecisionReason: reason,
-		},
-	}
-}
+var Ask = claude.Ask
 
 // PassThrough returns an empty output, letting the normal permission flow proceed.
-func PassThrough() PreToolUseOutput {
-	return PreToolUseOutput{}
-}
+var PassThrough = claude.PassThrough
 
 // =============================================================================
-// PermissionRequest Helpers
+// PermissionRequest Helpers (re-exported from claude)
 // =============================================================================
 
 // AllowPermission grants the permission request.
-func AllowPermission() PermissionRequestOutput {
-	return PermissionRequestOutput{
-		HookSpecificOutput: &PermissionRequestHookOutput{
-			HookEventName: "PermissionRequest",
-			Decision: &PermissionRequestDecision{
-				Behavior: "allow",
-			},
-		},
-	}
-}
+var AllowPermission = claude.AllowPermission
 
 // AllowPermissionWithInput grants the permission with modified tool input.
-func AllowPermissionWithInput(updatedInput map[string]any) PermissionRequestOutput {
-	return PermissionRequestOutput{
-		HookSpecificOutput: &PermissionRequestHookOutput{
-			HookEventName: "PermissionRequest",
-			Decision: &PermissionRequestDecision{
-				Behavior:     "allow",
-				UpdatedInput: updatedInput,
-			},
-		},
-	}
-}
+var AllowPermissionWithInput = claude.AllowPermissionWithInput
 
 // DenyPermission rejects the permission request.
-func DenyPermission(message string) PermissionRequestOutput {
-	return PermissionRequestOutput{
-		HookSpecificOutput: &PermissionRequestHookOutput{
-			HookEventName: "PermissionRequest",
-			Decision: &PermissionRequestDecision{
-				Behavior: "deny",
-				Message:  message,
-			},
-		},
-	}
-}
+var DenyPermission = claude.DenyPermission
 
 // DenyPermissionAndStop rejects the permission and stops Droid.
-func DenyPermissionAndStop(message string) PermissionRequestOutput {
-	return PermissionRequestOutput{
-		HookSpecificOutput: &PermissionRequestHookOutput{
-			HookEventName: "PermissionRequest",
-			Decision: &PermissionRequestDecision{
-				Behavior:  "deny",
-				Message:   message,
-				Interrupt: true,
-			},
-		},
-	}
-}
+var DenyPermissionAndStop = claude.DenyPermissionAndStop
 
 // =============================================================================
-// PostToolUse Helpers
+// PostToolUse Helpers (re-exported from claude)
 // =============================================================================
 
 // PostToolOK returns an empty output, allowing normal flow to continue.
-func PostToolOK() PostToolUseOutput {
-	return PostToolUseOutput{}
-}
+var PostToolOK = claude.PostToolOK
 
 // PostToolBlock provides feedback to Droid that something needs attention.
-func PostToolBlock(reason string) PostToolUseOutput {
-	return PostToolUseOutput{
-		Decision: "block",
-		Reason:   reason,
-	}
-}
+var PostToolBlock = claude.PostToolBlock
 
 // PostToolContext adds context for Droid to consider.
-func PostToolContext(context string) PostToolUseOutput {
-	return PostToolUseOutput{
-		HookSpecificOutput: &PostToolUseHookOutput{
-			HookEventName:     "PostToolUse",
-			AdditionalContext: context,
-		},
-	}
-}
+var PostToolContext = claude.PostToolContext
 
 // =============================================================================
-// UserPromptSubmit Helpers
+// UserPromptSubmit Helpers (re-exported from claude)
 // =============================================================================
 
 // AllowPrompt allows the prompt to be processed normally.
-func AllowPrompt() UserPromptSubmitOutput {
-	return UserPromptSubmitOutput{}
-}
+var AllowPrompt = claude.AllowPrompt
 
 // BlockPrompt prevents the prompt from being processed.
-func BlockPrompt(reason string) UserPromptSubmitOutput {
-	return UserPromptSubmitOutput{
-		Decision: "block",
-		Reason:   reason,
-	}
-}
+var BlockPrompt = claude.BlockPrompt
 
 // AddContext allows the prompt and adds context for Droid.
-func AddContext(context string) UserPromptSubmitOutput {
-	return UserPromptSubmitOutput{
-		HookSpecificOutput: &UserPromptSubmitHookOutput{
-			HookEventName:     "UserPromptSubmit",
-			AdditionalContext: context,
-		},
-	}
-}
+var AddContext = claude.AddContext
 
 // =============================================================================
-// SessionStart Helpers
+// SessionStart Helpers (re-exported from claude)
 // =============================================================================
 
 // SessionStartOK returns an empty output for session start.
-func SessionStartOK() SessionStartOutput {
-	return SessionStartOutput{}
-}
+var SessionStartOK = claude.SessionStartOK
 
 // SessionStartContext adds context at the start of a session.
-func SessionStartContext(context string) SessionStartOutput {
-	return SessionStartOutput{
-		HookSpecificOutput: &SessionStartHookOutput{
-			HookEventName:     "SessionStart",
-			AdditionalContext: context,
-		},
-	}
-}
+var SessionStartContext = claude.SessionStartContext
 
 // =============================================================================
-// SessionEnd Helpers
+// SessionEnd Helpers (re-exported from claude)
 // =============================================================================
 
 // SessionEndOK returns an empty output for session end.
-func SessionEndOK() SessionEndOutput {
-	return SessionEndOutput{}
-}
+var SessionEndOK = claude.SessionEndOK
 
 // =============================================================================
-// Notification Helpers
+// Notification Helpers (re-exported from claude)
 // =============================================================================
 
 // NotificationOK returns an empty output for notifications.
-func NotificationOK() NotificationOutput {
-	return NotificationOutput{}
-}
+var NotificationOK = claude.NotificationOK
 
 // =============================================================================
-// PreCompact Helpers
+// PreCompact Helpers (re-exported from claude)
 // =============================================================================
 
 // PreCompactOK returns an empty output for pre-compact.
-func PreCompactOK() PreCompactOutput {
-	return PreCompactOutput{}
-}
+var PreCompactOK = claude.PreCompactOK
