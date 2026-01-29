@@ -1,6 +1,6 @@
 # hookshot
 
-A Go library for building hooks for AI coding agents like [Cursor](https://cursor.com/docs/agent/hooks), [Claude Code](https://docs.claude.com/en/docs/claude-code/hooks), [Windsurf Cascade](https://docs.codeium.com/windsurf/memories#hooks), and Factory Droid.
+A Go library for building hooks for AI coding agents like [Cursor](https://cursor.com/docs/agent/hooks), [Claude Code](https://docs.claude.com/en/docs/claude-code/hooks), [Windsurf Cascade](https://docs.codeium.com/windsurf/memories#hooks), and [Factory Droid](https://docs.factory.ai/reference/hooks-reference).
 
 Hooks are a key component of [Agentic Coding Security Management (ACSM)](https://corridor.dev/blog/introducing-acsm/) — they let you observe, control, and secure AI agent behavior in your development environment.
 
