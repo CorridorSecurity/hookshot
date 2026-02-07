@@ -60,11 +60,15 @@ import (
 	"strings"
 
 	"github.com/CorridorSecurity/hookshot"
+	"github.com/CorridorSecurity/hookshot/agenttrace"
 	"github.com/CorridorSecurity/hookshot/cascade"
 	"github.com/CorridorSecurity/hookshot/claude"
 	"github.com/CorridorSecurity/hookshot/cursor"
 	"github.com/CorridorSecurity/hookshot/droid"
 )
+
+// traceRecorder accumulates AI file edit events for agent-trace attribution.
+var traceRecorder = agenttrace.NewRecorder(&agenttrace.Tool{Name: "hookshot-example"})
 
 func main() {
 	// ==========================================================================
@@ -148,6 +152,12 @@ func handleBeforeExecution(ctx hookshot.ExecutionContext) hookshot.ExecutionDeci
 func handleAfterFileEdit(ctx hookshot.FileEditContext) hookshot.FileEditDecision {
 	// Log file edits
 	fmt.Printf("File edited: %s\n", ctx.FilePath)
+
+	// Record the edit for agent-trace attribution
+	traceRecorder.Record(ctx.FilePath, "",
+		agenttrace.Contributor{Type: agenttrace.ContributorAI},
+		nil, // no line-level ranges in this example
+	)
 
 	// Claude Code: Add context if TODO found
 	if ctx.Platform == hookshot.PlatformClaude {

@@ -112,6 +112,7 @@
 //   - hookshot (this package): Core Run/Register/RunCommand functions
 //   - hookshot/claude: Types and helpers for Claude Code hooks
 //   - hookshot/cursor: Types and helpers for Cursor hooks
+//   - hookshot/agenttrace: Agent Trace schema types, recorder, and file I/O
 //   - hookshot/build: Cross-platform build tool
 //   - hookshot/internal: Internal JSON I/O (not for external use)
 //
