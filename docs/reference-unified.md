@@ -1,6 +1,6 @@
 # Unified API Reference
 
-The unified API provides cross-platform handlers that work on both Claude Code and Cursor. Write once, run on both platforms.
+The unified API provides cross-platform handlers that work on Claude Code, Cursor, Windsurf Cascade, and Factory Droid. Write once, run on all platforms.
 
 ## Platform Constants
 
@@ -8,8 +8,10 @@ The unified API provides cross-platform handlers that work on both Claude Code a
 type Platform string
 
 const (
-    PlatformClaude Platform = "claude"
-    PlatformCursor Platform = "cursor"
+    PlatformClaude  Platform = "claude"
+    PlatformCursor  Platform = "cursor"
+    PlatformDroid   Platform = "droid"
+    PlatformCascade Platform = "cascade"
 )
 ```
 
@@ -17,17 +19,17 @@ const (
 
 Handles stop events when the agent is about to finish.
 
-**Registers:** `claude-stop`, `cursor-stop`
+**Registers:** `claude-stop`, `cursor-stop`, `droid-stop`, `cascade-post-cascade-response`
 
 ### StopContext
 
 ```go
 type StopContext struct {
     Platform  Platform
-    SessionID string // Claude: session_id, Cursor: conversation_id
-    Cwd       string // Working directory (Claude only, empty for Cursor)
+    SessionID string // Claude/Droid: session_id, Cursor: conversation_id, Cascade: trajectory_id
+    Cwd       string // Working directory (Claude/Droid only, empty for Cursor/Cascade)
 
-    // Claude-specific
+    // Claude/Droid-specific
     StopHookActive bool // True if already continuing from a previous stop hook
 
     // Cursor-specific
@@ -40,8 +42,9 @@ type StopContext struct {
 
 ```go
 // ShouldSkip returns true if the stop hook should be skipped to prevent loops.
-// Claude: checks StopHookActive
+// Claude/Droid: checks StopHookActive
 // Cursor: checks LoopCount >= 3
+// Cascade: always returns false (no loop prevention mechanism)
 func (c StopContext) ShouldSkip() bool
 ```
 
@@ -83,7 +86,7 @@ hookshot.OnStop(func(ctx hookshot.StopContext) hookshot.StopDecision {
 
 Handles pre-execution events for shell commands and MCP tools.
 
-**Registers:** `claude-pre-tool-use`, `cursor-before-shell`, `cursor-before-mcp`
+**Registers:** `claude-pre-tool-use`, `cursor-before-shell`, `cursor-before-mcp`, `droid-pre-tool-use`, `cascade-pre-run-command`, `cascade-pre-mcp-tool-use`
 
 ### ExecutionType
 
@@ -106,18 +109,20 @@ type ExecutionContext struct {
 
     // For shell execution (Cursor beforeShellExecution, Claude Code Bash tool)
     // Also used for local MCP servers on Cursor (command-based MCP servers)
-    // NOTE: Only populated for Cursor, not Claude Code
+    // NOTE: Only populated for Cursor and Cascade, not Claude Code or Droid
     Command string
     Cwd     string // Working directory
 
     // For MCP execution
     ToolName  string          // MCP tool name (e.g., "mcp__server__tool")
     ToolInput json.RawMessage // Tool input as JSON
-    ServerURL string          // MCP server URL (Cursor only, for URL-based servers)
+    ServerURL string          // MCP server URL (Cursor/Cascade only, for URL-based servers)
 
     // Raw access
     RawClaudeCode *claude.PreToolUseInput
     RawCursor     any // *cursor.BeforeShellExecutionInput or *cursor.BeforeMCPExecutionInput
+    RawDroid      *droid.PreToolUseInput
+    RawCascade    any // *cascade.PreRunCommandInput or *cascade.PreMCPToolUseInput
 }
 ```
 
@@ -173,7 +178,7 @@ hookshot.OnBeforeExecution(func(ctx hookshot.ExecutionContext) hookshot.Executio
 
 Handles post-file-edit events.
 
-**Registers:** `claude-after-file-edit`, `cursor-after-file-edit`
+**Registers:** `claude-after-file-edit`, `cursor-after-file-edit`, `droid-after-file-edit`, `cascade-post-write-code`
 
 ### FileEdit
 
@@ -189,7 +194,7 @@ type FileEdit struct {
 ```go
 type FileEditContext struct {
     Platform  Platform
-    SessionID string // Claude: session_id, Cursor: conversation_id
+    SessionID string // Claude/Droid: session_id, Cursor: conversation_id, Cascade: trajectory_id
     FilePath  string
     Edits     []FileEdit
     Cwd       string
@@ -197,6 +202,8 @@ type FileEditContext struct {
     // Raw access
     RawClaudeCode *claude.PostToolUseInput
     RawCursor     *cursor.AfterFileEditInput
+    RawDroid      *droid.PostToolUseInput
+    RawCascade    *cascade.PostWriteCodeInput
 }
 ```
 
@@ -244,19 +251,21 @@ hookshot.OnAfterFileEdit(func(ctx hookshot.FileEditContext) hookshot.FileEditDec
 
 Handles prompt submission events.
 
-**Registers:** `claude-user-prompt-submit`, `cursor-before-submit-prompt`
+**Registers:** `claude-user-prompt-submit`, `cursor-before-submit-prompt`, `droid-user-prompt-submit`, `cascade-pre-user-prompt`
 
 ### PromptContext
 
 ```go
 type PromptContext struct {
     Platform  Platform
-    SessionID string // Claude: session_id, Cursor: conversation_id
+    SessionID string // Claude/Droid: session_id, Cursor: conversation_id, Cascade: trajectory_id
     Prompt    string
 
     // Raw access
     RawClaudeCode *claude.UserPromptSubmitInput
     RawCursor     *cursor.BeforeSubmitPromptInput
+    RawDroid      *droid.UserPromptSubmitInput
+    RawCascade    *cascade.PreUserPromptInput
 }
 ```
 
