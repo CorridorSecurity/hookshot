@@ -63,13 +63,13 @@ import (
 	"github.com/CorridorSecurity/hookshot/cascade"
 	"github.com/CorridorSecurity/hookshot/claude"
 	"github.com/CorridorSecurity/hookshot/cursor"
-	"github.com/CorridorSecurity/hookshot/droid"
 )
 
 func main() {
 	// ==========================================================================
 	// UNIFIED HANDLERS
-	// Write once, works on both Claude Code and Cursor automatically.
+	// Write once, works on Claude Code, Cursor, Windsurf Cascade, and
+	// Factory Droid automatically.
 	// ==========================================================================
 
 	hookshot.OnStop(handleStop)
@@ -89,20 +89,12 @@ func main() {
 	hookshot.Register("cursor-before-tab-read", handleCursorBeforeTabRead)
 
 	// ==========================================================================
-	// WINDSURF CASCADE HANDLERS
+	// WINDSURF CASCADE: pre-write-code (no unified equivalent)
+	// Other Cascade hooks (pre-run-command, pre-mcp-tool-use, pre-user-prompt,
+	// post-cascade-response, post-write-code) are covered by unified handlers.
 	// ==========================================================================
 
-	hookshot.Register("cascade-pre-run-command", handleCascadePreRunCommand)
 	hookshot.Register("cascade-pre-write-code", handleCascadePreWriteCode)
-	hookshot.Register("cascade-pre-user-prompt", handleCascadePreUserPrompt)
-
-	// ==========================================================================
-	// FACTORY DROID HANDLERS
-	// ==========================================================================
-
-	hookshot.Register("droid-stop", handleDroidStop)
-	hookshot.Register("droid-pre-tool-use", handleDroidPreToolUse)
-	hookshot.Register("droid-user-prompt-submit", handleDroidUserPromptSubmit)
 
 	hookshot.RunCommand()
 }
@@ -202,19 +194,10 @@ func handleCursorBeforeTabRead() {
 }
 
 // =============================================================================
-// PLATFORM-SPECIFIC: Windsurf Cascade
-// Cascade uses exit code 2 to block actions, so we use RunE with errors
+// PLATFORM-SPECIFIC: Windsurf Cascade pre-write-code
+// No unified equivalent exists for this hook.
+// Cascade uses exit code 2 to block actions, so we use RunE with errors.
 // =============================================================================
-
-func handleCascadePreRunCommand() {
-	hookshot.RunE(func(input cascade.PreRunCommandInput) (cascade.PreRunCommandOutput, error) {
-		// Block dangerous shell commands
-		if strings.Contains(input.ToolInfo.CommandLine, "rm -rf /") {
-			return cascade.PreRunCommandOutput{}, fmt.Errorf("Dangerous command blocked")
-		}
-		return cascade.AllowCommand(), nil
-	})
-}
 
 func handleCascadePreWriteCode() {
 	hookshot.RunE(func(input cascade.PreWriteCodeInput) (cascade.PreWriteCodeOutput, error) {
@@ -223,55 +206,5 @@ func handleCascadePreWriteCode() {
 			return cascade.PreWriteCodeOutput{}, fmt.Errorf("Cannot write to .env files")
 		}
 		return cascade.AllowWrite(), nil
-	})
-}
-
-func handleCascadePreUserPrompt() {
-	hookshot.RunE(func(input cascade.PreUserPromptInput) (cascade.PreUserPromptOutput, error) {
-		// Block prompts with API keys
-		if strings.Contains(strings.ToLower(input.ToolInfo.Prompt), "api_key=") {
-			return cascade.PreUserPromptOutput{}, fmt.Errorf("Don't include API keys in prompts")
-		}
-		return cascade.AllowPrompt(), nil
-	})
-}
-
-// =============================================================================
-// PLATFORM-SPECIFIC: Factory Droid
-// =============================================================================
-
-func handleDroidStop() {
-	hookshot.Run(func(input droid.StopInput) droid.StopOutput {
-		// IMPORTANT: Check StopHookActive to prevent infinite loops
-		if input.StopHookActive {
-			return droid.Continue()
-		}
-		return droid.Continue()
-	})
-}
-
-func handleDroidPreToolUse() {
-	hookshot.Run(func(input droid.PreToolUseInput) droid.PreToolUseOutput {
-		// Block specific MCP servers
-		if strings.HasPrefix(input.ToolName, "mcp__blocked__") {
-			return droid.Deny("MCP server not allowed")
-		}
-
-		// Auto-approve Read tool
-		if input.ToolName == "Read" {
-			return droid.AllowSilent()
-		}
-
-		return droid.PassThrough()
-	})
-}
-
-func handleDroidUserPromptSubmit() {
-	hookshot.Run(func(input droid.UserPromptSubmitInput) droid.UserPromptSubmitOutput {
-		// Block prompts with API keys
-		if strings.Contains(strings.ToLower(input.Prompt), "api_key=") {
-			return droid.BlockPrompt("Don't include API keys in prompts")
-		}
-		return droid.AllowPrompt()
 	})
 }

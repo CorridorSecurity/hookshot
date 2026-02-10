@@ -2,6 +2,7 @@ package hookshot
 
 import (
 	"encoding/json"
+	"errors"
 
 	"github.com/CorridorSecurity/hookshot/cascade"
 	"github.com/CorridorSecurity/hookshot/claude"
@@ -378,8 +379,10 @@ func OnBeforeExecution(handler ExecutionHandler) {
 	})
 
 	// Cascade preRunCommand
+	// Uses RunE so that blocking decisions exit with code 2, which is how
+	// Windsurf Cascade detects that a hook has denied an action.
 	Register("cascade-pre-run-command", func() {
-		Run(func(input cascade.PreRunCommandInput) cascade.PreRunCommandOutput {
+		RunE(func(input cascade.PreRunCommandInput) (cascade.PreRunCommandOutput, error) {
 			ctx := ExecutionContext{
 				Platform:   PlatformCascade,
 				Type:       ExecutionShell,
@@ -390,18 +393,17 @@ func OnBeforeExecution(handler ExecutionHandler) {
 
 			decision := handler(ctx)
 			if decision.Allow {
-				return cascade.AllowCommand()
+				return cascade.AllowCommand(), nil
 			}
-			if decision.Ask {
-				return cascade.AskCommand(decision.Reason)
-			}
-			return cascade.DenyCommand(decision.Reason)
+			return cascade.PreRunCommandOutput{}, errors.New(decision.Reason)
 		})
 	})
 
 	// Cascade preMCPToolUse
+	// Uses RunE so that blocking decisions exit with code 2, which is how
+	// Windsurf Cascade detects that a hook has denied an action.
 	Register("cascade-pre-mcp-tool-use", func() {
-		Run(func(input cascade.PreMCPToolUseInput) cascade.PreMCPToolUseOutput {
+		RunE(func(input cascade.PreMCPToolUseInput) (cascade.PreMCPToolUseOutput, error) {
 			ctx := ExecutionContext{
 				Platform:   PlatformCascade,
 				Type:       ExecutionMCP,
@@ -413,12 +415,9 @@ func OnBeforeExecution(handler ExecutionHandler) {
 
 			decision := handler(ctx)
 			if decision.Allow {
-				return cascade.AllowMCP()
+				return cascade.AllowMCP(), nil
 			}
-			if decision.Ask {
-				return cascade.AskMCP(decision.Reason)
-			}
-			return cascade.DenyMCP(decision.Reason)
+			return cascade.PreMCPToolUseOutput{}, errors.New(decision.Reason)
 		})
 	})
 }
@@ -732,8 +731,10 @@ func OnPromptSubmit(handler PromptHandler) {
 	})
 
 	// Cascade preUserPrompt
+	// Uses RunE so that blocking decisions exit with code 2, which is how
+	// Windsurf Cascade detects that a hook has denied an action.
 	Register("cascade-pre-user-prompt", func() {
-		Run(func(input cascade.PreUserPromptInput) cascade.PreUserPromptOutput {
+		RunE(func(input cascade.PreUserPromptInput) (cascade.PreUserPromptOutput, error) {
 			ctx := PromptContext{
 				Platform:   PlatformCascade,
 				SessionID:  input.TrajectoryID,
@@ -743,9 +744,9 @@ func OnPromptSubmit(handler PromptHandler) {
 
 			decision := handler(ctx)
 			if !decision.Allow {
-				return cascade.BlockPrompt(decision.Reason)
+				return cascade.PreUserPromptOutput{}, errors.New(decision.Reason)
 			}
-			return cascade.AllowPrompt()
+			return cascade.AllowPrompt(), nil
 		})
 	})
 }

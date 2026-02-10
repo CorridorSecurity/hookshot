@@ -1,7 +1,11 @@
 package hookshot
 
 import (
+	"bytes"
 	"encoding/json"
+	"os"
+	"os/exec"
+	"strings"
 	"testing"
 )
 
@@ -281,6 +285,216 @@ func TestExecutionContext_CommandField(t *testing.T) {
 	// Verify IsMCP still works
 	if !ctx.IsMCP() {
 		t.Error("IsMCP should return true")
+	}
+}
+
+// =============================================================================
+// Unified Handler Registration Tests
+// =============================================================================
+
+func TestOnBeforeExecution_RegistersAllHandlers(t *testing.T) {
+	ClearHandlers()
+	defer ClearHandlers()
+
+	OnBeforeExecution(func(ctx ExecutionContext) ExecutionDecision {
+		return AllowExecution()
+	})
+
+	expectedHandlers := []string{
+		"claude-pre-tool-use",
+		"cursor-before-shell",
+		"cursor-before-mcp",
+		"droid-pre-tool-use",
+		"cascade-pre-run-command",
+		"cascade-pre-mcp-tool-use",
+	}
+
+	for _, name := range expectedHandlers {
+		if _, ok := handlers[name]; !ok {
+			t.Errorf("OnBeforeExecution did not register handler %q", name)
+		}
+	}
+}
+
+func TestOnPromptSubmit_RegistersAllHandlers(t *testing.T) {
+	ClearHandlers()
+	defer ClearHandlers()
+
+	OnPromptSubmit(func(ctx PromptContext) PromptDecision {
+		return AllowPromptDecision()
+	})
+
+	expectedHandlers := []string{
+		"claude-user-prompt-submit",
+		"cursor-before-submit-prompt",
+		"droid-user-prompt-submit",
+		"cascade-pre-user-prompt",
+	}
+
+	for _, name := range expectedHandlers {
+		if _, ok := handlers[name]; !ok {
+			t.Errorf("OnPromptSubmit did not register handler %q", name)
+		}
+	}
+}
+
+func TestOnStop_RegistersAllHandlers(t *testing.T) {
+	ClearHandlers()
+	defer ClearHandlers()
+
+	OnStop(func(ctx StopContext) StopDecision {
+		return AllowStop()
+	})
+
+	expectedHandlers := []string{
+		"claude-stop",
+		"cursor-stop",
+		"droid-stop",
+		"cascade-post-cascade-response",
+	}
+
+	for _, name := range expectedHandlers {
+		if _, ok := handlers[name]; !ok {
+			t.Errorf("OnStop did not register handler %q", name)
+		}
+	}
+}
+
+func TestOnAfterFileEdit_RegistersAllHandlers(t *testing.T) {
+	ClearHandlers()
+	defer ClearHandlers()
+
+	OnAfterFileEdit(func(ctx FileEditContext) FileEditDecision {
+		return FileEditOK()
+	})
+
+	expectedHandlers := []string{
+		"claude-after-file-edit",
+		"cursor-after-file-edit",
+		"droid-after-file-edit",
+		"cascade-post-write-code",
+	}
+
+	for _, name := range expectedHandlers {
+		if _, ok := handlers[name]; !ok {
+			t.Errorf("OnAfterFileEdit did not register handler %q", name)
+		}
+	}
+}
+
+// =============================================================================
+// Cascade RunE Behavior Tests (exit code 2 on deny, 0 on allow)
+// =============================================================================
+
+// TestCascadePreHooks_RunE verifies that cascade pre-hooks use RunE so that
+// blocking decisions exit with code 2 (how Windsurf Cascade detects denials).
+func TestCascadePreHooks_RunE(t *testing.T) {
+	// Subprocess entry point: when invoked as a subprocess, register handlers
+	// and execute the specified cascade handler with controlled stdin.
+	if handler := os.Getenv("HOOKSHOT_TEST_CASCADE_HANDLER"); handler != "" {
+		decision := os.Getenv("HOOKSHOT_TEST_CASCADE_DECISION")
+
+		ClearHandlers()
+		OnBeforeExecution(func(ctx ExecutionContext) ExecutionDecision {
+			if decision == "deny" {
+				return DenyExecution("blocked by test")
+			}
+			return AllowExecution()
+		})
+		OnPromptSubmit(func(ctx PromptContext) PromptDecision {
+			if decision == "deny" {
+				return BlockPromptDecision("blocked by test")
+			}
+			return AllowPromptDecision()
+		})
+
+		handlers[handler]()
+		return
+	}
+
+	tests := []struct {
+		name       string
+		handler    string
+		stdinJSON  string
+		decision   string
+		wantExit   int
+		wantStderr string // substring expected in stderr (empty = don't check)
+	}{
+		{
+			name:       "cascade-pre-run-command deny exits 2",
+			handler:    "cascade-pre-run-command",
+			stdinJSON:  `{"trajectory_id":"test","tool_info":{"command_line":"rm -rf /","cwd":"/tmp"}}`,
+			decision:   "deny",
+			wantExit:   2,
+			wantStderr: "blocked by test",
+		},
+		{
+			name:      "cascade-pre-run-command allow exits 0",
+			handler:   "cascade-pre-run-command",
+			stdinJSON: `{"trajectory_id":"test","tool_info":{"command_line":"ls","cwd":"/tmp"}}`,
+			decision:  "allow",
+			wantExit:  0,
+		},
+		{
+			name:       "cascade-pre-mcp-tool-use deny exits 2",
+			handler:    "cascade-pre-mcp-tool-use",
+			stdinJSON:  `{"trajectory_id":"test","tool_info":{"tool_name":"analyze","tool_input":"{}","server_url":"https://example.com"}}`,
+			decision:   "deny",
+			wantExit:   2,
+			wantStderr: "blocked by test",
+		},
+		{
+			name:      "cascade-pre-mcp-tool-use allow exits 0",
+			handler:   "cascade-pre-mcp-tool-use",
+			stdinJSON: `{"trajectory_id":"test","tool_info":{"tool_name":"analyze","tool_input":"{}","server_url":"https://example.com"}}`,
+			decision:  "allow",
+			wantExit:  0,
+		},
+		{
+			name:       "cascade-pre-user-prompt deny exits 2",
+			handler:    "cascade-pre-user-prompt",
+			stdinJSON:  `{"trajectory_id":"test","tool_info":{"prompt":"hello"}}`,
+			decision:   "deny",
+			wantExit:   2,
+			wantStderr: "blocked by test",
+		},
+		{
+			name:      "cascade-pre-user-prompt allow exits 0",
+			handler:   "cascade-pre-user-prompt",
+			stdinJSON: `{"trajectory_id":"test","tool_info":{"prompt":"hello"}}`,
+			decision:  "allow",
+			wantExit:  0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cmd := exec.Command(os.Args[0], "-test.run=^TestCascadePreHooks_RunE$")
+			cmd.Env = append(os.Environ(),
+				"HOOKSHOT_TEST_CASCADE_HANDLER="+tt.handler,
+				"HOOKSHOT_TEST_CASCADE_DECISION="+tt.decision,
+			)
+			cmd.Stdin = strings.NewReader(tt.stdinJSON)
+			var stdout, stderr bytes.Buffer
+			cmd.Stdout = &stdout
+			cmd.Stderr = &stderr
+
+			err := cmd.Run()
+
+			exitCode := 0
+			if exitErr, ok := err.(*exec.ExitError); ok {
+				exitCode = exitErr.ExitCode()
+			} else if err != nil {
+				t.Fatalf("unexpected error running subprocess: %v", err)
+			}
+
+			if exitCode != tt.wantExit {
+				t.Errorf("exit code = %d, want %d (stderr: %s)", exitCode, tt.wantExit, stderr.String())
+			}
+			if tt.wantStderr != "" && !strings.Contains(stderr.String(), tt.wantStderr) {
+				t.Errorf("stderr = %q, want substring %q", stderr.String(), tt.wantStderr)
+			}
+		})
 	}
 }
 
