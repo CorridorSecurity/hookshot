@@ -152,9 +152,14 @@ Called before writing a file.
 ### PreWriteCodeInput
 
 ```go
+type CascadeEdit struct {
+    OldString string `json:"old_string"`
+    NewString string `json:"new_string"`
+}
+
 type PreWriteCodeToolInfo struct {
-    FilePath string `json:"file_path"`
-    Content  string `json:"content"`
+    FilePath string        `json:"file_path"`
+    Edits    []CascadeEdit `json:"edits"`
 }
 
 type PreWriteCodeInput struct {
@@ -202,8 +207,8 @@ Called after writing a file.
 
 ```go
 type PostWriteCodeToolInfo struct {
-    FilePath string `json:"file_path"`
-    Content  string `json:"content"`
+    FilePath string        `json:"file_path"`
+    Edits    []CascadeEdit `json:"edits"`
 }
 
 type PostWriteCodeInput struct {
@@ -314,9 +319,9 @@ Called before an MCP tool executes.
 
 ```go
 type PreMCPToolUseToolInfo struct {
-    ToolName  string `json:"tool_name"`
-    ToolInput string `json:"tool_input"` // JSON string of parameters
-    ServerURL string `json:"server_url,omitempty"`
+    MCPServerName    string          `json:"mcp_server_name"`
+    MCPToolName      string          `json:"mcp_tool_name"`
+    MCPToolArguments json.RawMessage `json:"mcp_tool_arguments"`
 }
 
 type PreMCPToolUseInput struct {
@@ -346,7 +351,7 @@ func AskMCP(message string) PreMCPToolUseOutput
 ```go
 hookshot.Register("cascade-pre-mcp-tool-use", func() {
     hookshot.RunE(func(input cascade.PreMCPToolUseInput) (cascade.PreMCPToolUseOutput, error) {
-        if strings.Contains(input.ToolInfo.ServerURL, "blocked.com") {
+        if input.ToolInfo.MCPServerName == "blocked-server" {
             return cascade.PreMCPToolUseOutput{}, fmt.Errorf("MCP server not allowed")
         }
         return cascade.AllowMCP(), nil
@@ -364,9 +369,10 @@ Called after an MCP tool executes.
 
 ```go
 type PostMCPToolUseToolInfo struct {
-    ToolName   string `json:"tool_name"`
-    ToolInput  string `json:"tool_input"`
-    ToolOutput string `json:"tool_output,omitempty"`
+    MCPServerName    string          `json:"mcp_server_name"`
+    MCPToolName      string          `json:"mcp_tool_name"`
+    MCPToolArguments json.RawMessage `json:"mcp_tool_arguments"`
+    MCPResult        string          `json:"mcp_result,omitempty"`
 }
 
 type PostMCPToolUseInput struct {
@@ -397,7 +403,7 @@ Called when the user submits a prompt.
 
 ```go
 type PreUserPromptToolInfo struct {
-    Prompt string `json:"prompt"`
+    UserPrompt string `json:"user_prompt"`
 }
 
 type PreUserPromptInput struct {
@@ -426,7 +432,7 @@ func BlockPrompt(message string) PreUserPromptOutput
 ```go
 hookshot.Register("cascade-pre-user-prompt", func() {
     hookshot.RunE(func(input cascade.PreUserPromptInput) (cascade.PreUserPromptOutput, error) {
-        if strings.Contains(input.ToolInfo.Prompt, "api_key=") {
+        if strings.Contains(input.ToolInfo.UserPrompt, "api_key=") {
             return cascade.PreUserPromptOutput{}, fmt.Errorf("Don't include API keys in prompts")
         }
         return cascade.AllowPrompt(), nil
