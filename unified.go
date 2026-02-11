@@ -332,8 +332,10 @@ func OnBeforeExecution(handler ExecutionHandler) {
 	})
 
 	// Droid PreToolUse (for Bash and MCP tools)
+	// Uses RunE so that blocking decisions exit with code 2, which is how
+	// Factory Droid detects that a hook has denied an action.
 	Register("droid-pre-tool-use", func() {
-		Run(func(input droid.PreToolUseInput) droid.PreToolUseOutput {
+		RunE(func(input droid.PreToolUseInput) (droid.PreToolUseOutput, error) {
 			// Determine execution type
 			var execType ExecutionType
 			if input.ToolName == "Bash" {
@@ -367,14 +369,12 @@ func OnBeforeExecution(handler ExecutionHandler) {
 			decision := handler(ctx)
 			if decision.Allow {
 				if decision.Reason != "" {
-					return droid.Allow(decision.Reason)
+					return droid.Allow(decision.Reason), nil
 				}
-				return droid.AllowSilent()
+				return droid.AllowSilent(), nil
 			}
-			if decision.Ask {
-				return droid.Ask(decision.Reason)
-			}
-			return droid.Deny(decision.Reason)
+			// Exit code 2 + stderr message for blocking (per Factory docs)
+			return droid.PreToolUseOutput{}, errors.New(decision.Reason)
 		})
 	})
 
@@ -407,9 +407,9 @@ func OnBeforeExecution(handler ExecutionHandler) {
 			ctx := ExecutionContext{
 				Platform:   PlatformCascade,
 				Type:       ExecutionMCP,
-				ToolName:   input.ToolInfo.ToolName,
-				ToolInput:  json.RawMessage(input.ToolInfo.ToolInput),
-				ServerURL:  input.ToolInfo.ServerURL,
+				ToolName:   input.ToolInfo.MCPToolName,
+				ToolInput:  input.ToolInfo.MCPToolArguments,
+				ServerURL:  input.ToolInfo.MCPServerName,
 				RawCascade: &input,
 			}
 
@@ -598,7 +598,10 @@ func OnAfterFileEdit(handler FileEditHandler) {
 	// Cascade postWriteCode
 	Register("cascade-post-write-code", func() {
 		Run(func(input cascade.PostWriteCodeInput) cascade.PostWriteCodeOutput {
-			edits := []FileEdit{{OldString: "", NewString: input.ToolInfo.Content}}
+			var edits []FileEdit
+			for _, e := range input.ToolInfo.Edits {
+				edits = append(edits, FileEdit{OldString: e.OldString, NewString: e.NewString})
+			}
 
 			ctx := FileEditContext{
 				Platform:   PlatformCascade,
@@ -738,7 +741,7 @@ func OnPromptSubmit(handler PromptHandler) {
 			ctx := PromptContext{
 				Platform:   PlatformCascade,
 				SessionID:  input.TrajectoryID,
-				Prompt:     input.ToolInfo.Prompt,
+				Prompt:     input.ToolInfo.UserPrompt,
 				RawCascade: &input,
 			}
 

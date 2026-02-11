@@ -386,8 +386,8 @@ func TestOnAfterFileEdit_RegistersAllHandlers(t *testing.T) {
 // Cascade RunE Behavior Tests (exit code 2 on deny, 0 on allow)
 // =============================================================================
 
-// TestCascadePreHooks_RunE verifies that cascade pre-hooks use RunE so that
-// blocking decisions exit with code 2 (how Windsurf Cascade detects denials).
+// TestPreHooks_RunE verifies that cascade and droid pre-hooks use RunE so that
+// blocking decisions exit with code 2 (how Windsurf Cascade and Factory Droid detect denials).
 func TestCascadePreHooks_RunE(t *testing.T) {
 	// Subprocess entry point: when invoked as a subprocess, register handlers
 	// and execute the specified cascade handler with controlled stdin.
@@ -438,7 +438,7 @@ func TestCascadePreHooks_RunE(t *testing.T) {
 		{
 			name:       "cascade-pre-mcp-tool-use deny exits 2",
 			handler:    "cascade-pre-mcp-tool-use",
-			stdinJSON:  `{"trajectory_id":"test","tool_info":{"tool_name":"analyze","tool_input":"{}","server_url":"https://example.com"}}`,
+			stdinJSON:  `{"trajectory_id":"test","tool_info":{"mcp_server_name":"example","mcp_tool_name":"analyze","mcp_tool_arguments":{}}}`,
 			decision:   "deny",
 			wantExit:   2,
 			wantStderr: "blocked by test",
@@ -446,14 +446,14 @@ func TestCascadePreHooks_RunE(t *testing.T) {
 		{
 			name:      "cascade-pre-mcp-tool-use allow exits 0",
 			handler:   "cascade-pre-mcp-tool-use",
-			stdinJSON: `{"trajectory_id":"test","tool_info":{"tool_name":"analyze","tool_input":"{}","server_url":"https://example.com"}}`,
+			stdinJSON: `{"trajectory_id":"test","tool_info":{"mcp_server_name":"example","mcp_tool_name":"analyze","mcp_tool_arguments":{}}}`,
 			decision:  "allow",
 			wantExit:  0,
 		},
 		{
 			name:       "cascade-pre-user-prompt deny exits 2",
 			handler:    "cascade-pre-user-prompt",
-			stdinJSON:  `{"trajectory_id":"test","tool_info":{"prompt":"hello"}}`,
+			stdinJSON:  `{"trajectory_id":"test","tool_info":{"user_prompt":"hello"}}`,
 			decision:   "deny",
 			wantExit:   2,
 			wantStderr: "blocked by test",
@@ -461,7 +461,22 @@ func TestCascadePreHooks_RunE(t *testing.T) {
 		{
 			name:      "cascade-pre-user-prompt allow exits 0",
 			handler:   "cascade-pre-user-prompt",
-			stdinJSON: `{"trajectory_id":"test","tool_info":{"prompt":"hello"}}`,
+			stdinJSON: `{"trajectory_id":"test","tool_info":{"user_prompt":"hello"}}`,
+			decision:  "allow",
+			wantExit:  0,
+		},
+		{
+			name:       "droid-pre-tool-use deny exits 2",
+			handler:    "droid-pre-tool-use",
+			stdinJSON:  `{"session_id":"test","tool_name":"mcp__blocked__tool","tool_input":{},"cwd":"/tmp"}`,
+			decision:   "deny",
+			wantExit:   2,
+			wantStderr: "blocked by test",
+		},
+		{
+			name:      "droid-pre-tool-use allow exits 0",
+			handler:   "droid-pre-tool-use",
+			stdinJSON: `{"session_id":"test","tool_name":"mcp__allowed__tool","tool_input":{},"cwd":"/tmp"}`,
 			decision:  "allow",
 			wantExit:  0,
 		},
