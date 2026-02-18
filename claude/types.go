@@ -15,7 +15,7 @@ type BaseInput struct {
 	SessionID      string `json:"session_id"`
 	TranscriptPath string `json:"transcript_path"`
 	Cwd            string `json:"cwd"`
-	PermissionMode string `json:"permission_mode"` // "default", "plan", "acceptEdits", "bypassPermissions"
+	PermissionMode string `json:"permission_mode"` // "default", "plan", "acceptEdits", "dontAsk", "bypassPermissions"
 	HookEventName  string `json:"hook_event_name"`
 }
 
@@ -57,9 +57,21 @@ type StopOutput struct {
 }
 
 // SubagentStopInput is received when a Claude Code subagent (Task tool) finishes.
-type SubagentStopInput = StopInput
+type SubagentStopInput struct {
+	BaseInput
+	// StopHookActive is true when the subagent is already continuing as a result of a stop hook.
+	StopHookActive bool `json:"stop_hook_active"`
+	// AgentID is the unique identifier for the subagent.
+	AgentID string `json:"agent_id"`
+	// AgentType is the agent type name (e.g. "Bash", "Explore", "Plan", or custom agent names).
+	// This is the value used for matcher filtering.
+	AgentType string `json:"agent_type"`
+	// AgentTranscriptPath is the path to the subagent's own transcript file.
+	AgentTranscriptPath string `json:"agent_transcript_path,omitempty"`
+}
 
 // SubagentStopOutput controls whether a subagent should stop or continue.
+// Uses the same decision format as StopOutput.
 type SubagentStopOutput = StopOutput
 
 // =============================================================================
@@ -71,6 +83,10 @@ type SessionStartInput struct {
 	BaseInput
 	// Source indicates how the session started: "startup", "resume", "clear", "compact"
 	Source string `json:"source"`
+	// Model is the model identifier (e.g. "claude-sonnet-4-6").
+	Model string `json:"model"`
+	// AgentType is the agent name when started via `claude --agent <name>`. May be empty.
+	AgentType string `json:"agent_type,omitempty"`
 }
 
 // SessionStartOutput can add context to the session.
@@ -92,7 +108,7 @@ type SessionStartHookOutput struct {
 // SessionEndInput is received when a Claude Code session ends.
 type SessionEndInput struct {
 	BaseInput
-	// Reason indicates why the session ended: "clear", "logout", "prompt_input_exit", "other"
+	// Reason indicates why the session ended: "clear", "logout", "prompt_input_exit", "bypass_permissions_disabled", "other"
 	Reason string `json:"reason"`
 }
 
@@ -125,18 +141,26 @@ type PreToolUseHookOutput struct {
 	PermissionDecision       string         `json:"permissionDecision,omitempty"`       // "allow", "deny", "ask"
 	PermissionDecisionReason string         `json:"permissionDecisionReason,omitempty"` // Shown to user (allow/ask) or Claude (deny)
 	UpdatedInput             map[string]any `json:"updatedInput,omitempty"`             // Modified tool input
+	AdditionalContext        string         `json:"additionalContext,omitempty"`        // Added to Claude's context before tool executes
 }
 
 // =============================================================================
 // PermissionRequest
 // =============================================================================
 
+// PermissionSuggestion represents an "always allow" option from the permission dialog.
+type PermissionSuggestion struct {
+	Type string `json:"type"`
+	Tool string `json:"tool,omitempty"`
+}
+
 // PermissionRequestInput is received when the user is shown a permission dialog.
 type PermissionRequestInput struct {
 	BaseInput
-	ToolName  string          `json:"tool_name"`
-	ToolInput json.RawMessage `json:"tool_input"`
-	ToolUseID string          `json:"tool_use_id"`
+	ToolName              string                 `json:"tool_name"`
+	ToolInput             json.RawMessage        `json:"tool_input"`
+	ToolUseID             string                 `json:"tool_use_id"`
+	PermissionSuggestions []PermissionSuggestion `json:"permission_suggestions,omitempty"`
 }
 
 // PermissionRequestOutput controls the permission dialog response.
@@ -153,10 +177,11 @@ type PermissionRequestHookOutput struct {
 
 // PermissionRequestDecision controls how the permission request is handled.
 type PermissionRequestDecision struct {
-	Behavior     string         `json:"behavior"`               // "allow" or "deny"
-	UpdatedInput map[string]any `json:"updatedInput,omitempty"` // For "allow": modified tool input
-	Message      string         `json:"message,omitempty"`      // For "deny": shown to Claude
-	Interrupt    bool           `json:"interrupt,omitempty"`    // For "deny": stop Claude if true
+	Behavior           string         `json:"behavior"`                     // "allow" or "deny"
+	UpdatedInput       map[string]any `json:"updatedInput,omitempty"`       // For "allow": modified tool input
+	UpdatedPermissions any            `json:"updatedPermissions,omitempty"` // For "allow": permission rule updates (equivalent to "always allow")
+	Message            string         `json:"message,omitempty"`            // For "deny": shown to Claude
+	Interrupt          bool           `json:"interrupt,omitempty"`          // For "deny": stop Claude if true
 }
 
 // =============================================================================
@@ -184,8 +209,9 @@ type PostToolUseOutput struct {
 
 // PostToolUseHookOutput contains post-tool-use-specific output fields.
 type PostToolUseHookOutput struct {
-	HookEventName     string `json:"hookEventName,omitempty"`
-	AdditionalContext string `json:"additionalContext,omitempty"` // Added to context for Claude
+	HookEventName       string `json:"hookEventName,omitempty"`
+	AdditionalContext   string `json:"additionalContext,omitempty"`   // Added to context for Claude
+	UpdatedMCPToolOutput any   `json:"updatedMCPToolOutput,omitempty"` // For MCP tools: replaces the tool's output
 }
 
 // =============================================================================
@@ -222,12 +248,20 @@ type UserPromptSubmitHookOutput struct {
 type NotificationInput struct {
 	BaseInput
 	Message          string `json:"message"`
+	Title            string `json:"title,omitempty"`
 	NotificationType string `json:"notification_type"` // "permission_prompt", "idle_prompt", "auth_success", "elicitation_dialog"
 }
 
-// NotificationOutput has no decision control - hooks just run for side effects.
+// NotificationOutput can add context to the conversation.
 type NotificationOutput struct {
 	BaseOutput
+	HookSpecificOutput *NotificationHookOutput `json:"hookSpecificOutput,omitempty"`
+}
+
+// NotificationHookOutput contains notification-specific output fields.
+type NotificationHookOutput struct {
+	HookEventName     string `json:"hookEventName,omitempty"`
+	AdditionalContext string `json:"additionalContext,omitempty"`
 }
 
 // =============================================================================

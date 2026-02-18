@@ -108,6 +108,22 @@ func TestAsk(t *testing.T) {
 	}
 }
 
+func TestAllowWithContext(t *testing.T) {
+	output := AllowWithContext("Tool is safe", "Running in production")
+	if output.HookSpecificOutput == nil {
+		t.Fatal("HookSpecificOutput should not be nil")
+	}
+	if output.HookSpecificOutput.PermissionDecision != "allow" {
+		t.Errorf("PermissionDecision = %q, want %q", output.HookSpecificOutput.PermissionDecision, "allow")
+	}
+	if output.HookSpecificOutput.PermissionDecisionReason != "Tool is safe" {
+		t.Errorf("PermissionDecisionReason = %q, want %q", output.HookSpecificOutput.PermissionDecisionReason, "Tool is safe")
+	}
+	if output.HookSpecificOutput.AdditionalContext != "Running in production" {
+		t.Errorf("AdditionalContext = %q, want %q", output.HookSpecificOutput.AdditionalContext, "Running in production")
+	}
+}
+
 func TestPassThrough(t *testing.T) {
 	output := PassThrough()
 	if output.HookSpecificOutput != nil {
@@ -156,6 +172,20 @@ func TestDenyPermission(t *testing.T) {
 	}
 }
 
+func TestAllowPermissionWithPermissions(t *testing.T) {
+	perms := map[string]any{"type": "toolAlwaysAllow", "tool": "Bash"}
+	output := AllowPermissionWithPermissions(perms)
+	if output.HookSpecificOutput == nil || output.HookSpecificOutput.Decision == nil {
+		t.Fatal("HookSpecificOutput and Decision should not be nil")
+	}
+	if output.HookSpecificOutput.Decision.Behavior != "allow" {
+		t.Errorf("Behavior = %q, want %q", output.HookSpecificOutput.Decision.Behavior, "allow")
+	}
+	if output.HookSpecificOutput.Decision.UpdatedPermissions == nil {
+		t.Error("UpdatedPermissions should not be nil")
+	}
+}
+
 func TestDenyPermissionAndStop(t *testing.T) {
 	output := DenyPermissionAndStop("Critical error")
 	if output.HookSpecificOutput == nil || output.HookSpecificOutput.Decision == nil {
@@ -197,6 +227,20 @@ func TestPostToolContext(t *testing.T) {
 	}
 	if output.HookSpecificOutput.AdditionalContext != "Additional info" {
 		t.Errorf("AdditionalContext = %q, want %q", output.HookSpecificOutput.AdditionalContext, "Additional info")
+	}
+}
+
+func TestPostToolReplaceMCPOutput(t *testing.T) {
+	replacement := map[string]string{"result": "sanitized"}
+	output := PostToolReplaceMCPOutput(replacement)
+	if output.HookSpecificOutput == nil {
+		t.Fatal("HookSpecificOutput should not be nil")
+	}
+	if output.HookSpecificOutput.HookEventName != "PostToolUse" {
+		t.Errorf("HookEventName = %q, want %q", output.HookSpecificOutput.HookEventName, "PostToolUse")
+	}
+	if output.HookSpecificOutput.UpdatedMCPToolOutput == nil {
+		t.Error("UpdatedMCPToolOutput should not be nil")
 	}
 }
 
@@ -263,7 +307,22 @@ func TestSessionEndOK(t *testing.T) {
 
 func TestNotificationOK(t *testing.T) {
 	output := NotificationOK()
-	_ = output
+	if output.HookSpecificOutput != nil {
+		t.Error("HookSpecificOutput should be nil for NotificationOK")
+	}
+}
+
+func TestNotificationContext(t *testing.T) {
+	output := NotificationContext("User needs help")
+	if output.HookSpecificOutput == nil {
+		t.Fatal("HookSpecificOutput should not be nil")
+	}
+	if output.HookSpecificOutput.HookEventName != "Notification" {
+		t.Errorf("HookEventName = %q, want %q", output.HookSpecificOutput.HookEventName, "Notification")
+	}
+	if output.HookSpecificOutput.AdditionalContext != "User needs help" {
+		t.Errorf("AdditionalContext = %q, want %q", output.HookSpecificOutput.AdditionalContext, "User needs help")
+	}
 }
 
 func TestPreCompactOK(t *testing.T) {
