@@ -2,6 +2,7 @@ package hookshot
 
 import (
 	"encoding/json"
+	"errors"
 
 	"github.com/CorridorSecurity/hookshot/cascade"
 	"github.com/CorridorSecurity/hookshot/claude"
@@ -331,8 +332,10 @@ func OnBeforeExecution(handler ExecutionHandler) {
 	})
 
 	// Droid PreToolUse (for Bash and MCP tools)
+	// Uses RunE so that blocking decisions exit with code 2, which is how
+	// Factory Droid detects that a hook has denied an action.
 	Register("droid-pre-tool-use", func() {
-		Run(func(input droid.PreToolUseInput) droid.PreToolUseOutput {
+		RunE(func(input droid.PreToolUseInput) (droid.PreToolUseOutput, error) {
 			// Determine execution type
 			var execType ExecutionType
 			if input.ToolName == "Bash" {
@@ -366,20 +369,20 @@ func OnBeforeExecution(handler ExecutionHandler) {
 			decision := handler(ctx)
 			if decision.Allow {
 				if decision.Reason != "" {
-					return droid.Allow(decision.Reason)
+					return droid.Allow(decision.Reason), nil
 				}
-				return droid.AllowSilent()
+				return droid.AllowSilent(), nil
 			}
-			if decision.Ask {
-				return droid.Ask(decision.Reason)
-			}
-			return droid.Deny(decision.Reason)
+			// Exit code 2 + stderr message for blocking (per Factory docs)
+			return droid.PreToolUseOutput{}, errors.New(decision.Reason)
 		})
 	})
 
 	// Cascade preRunCommand
+	// Uses RunE so that blocking decisions exit with code 2, which is how
+	// Windsurf Cascade detects that a hook has denied an action.
 	Register("cascade-pre-run-command", func() {
-		Run(func(input cascade.PreRunCommandInput) cascade.PreRunCommandOutput {
+		RunE(func(input cascade.PreRunCommandInput) (cascade.PreRunCommandOutput, error) {
 			ctx := ExecutionContext{
 				Platform:   PlatformCascade,
 				Type:       ExecutionShell,
@@ -390,35 +393,31 @@ func OnBeforeExecution(handler ExecutionHandler) {
 
 			decision := handler(ctx)
 			if decision.Allow {
-				return cascade.AllowCommand()
+				return cascade.AllowCommand(), nil
 			}
-			if decision.Ask {
-				return cascade.AskCommand(decision.Reason)
-			}
-			return cascade.DenyCommand(decision.Reason)
+			return cascade.PreRunCommandOutput{}, errors.New(decision.Reason)
 		})
 	})
 
 	// Cascade preMCPToolUse
+	// Uses RunE so that blocking decisions exit with code 2, which is how
+	// Windsurf Cascade detects that a hook has denied an action.
 	Register("cascade-pre-mcp-tool-use", func() {
-		Run(func(input cascade.PreMCPToolUseInput) cascade.PreMCPToolUseOutput {
+		RunE(func(input cascade.PreMCPToolUseInput) (cascade.PreMCPToolUseOutput, error) {
 			ctx := ExecutionContext{
 				Platform:   PlatformCascade,
 				Type:       ExecutionMCP,
-				ToolName:   input.ToolInfo.ToolName,
-				ToolInput:  json.RawMessage(input.ToolInfo.ToolInput),
-				ServerURL:  input.ToolInfo.ServerURL,
+				ToolName:   input.ToolInfo.MCPToolName,
+				ToolInput:  input.ToolInfo.MCPToolArguments,
+				ServerURL:  input.ToolInfo.MCPServerName,
 				RawCascade: &input,
 			}
 
 			decision := handler(ctx)
 			if decision.Allow {
-				return cascade.AllowMCP()
+				return cascade.AllowMCP(), nil
 			}
-			if decision.Ask {
-				return cascade.AskMCP(decision.Reason)
-			}
-			return cascade.DenyMCP(decision.Reason)
+			return cascade.PreMCPToolUseOutput{}, errors.New(decision.Reason)
 		})
 	})
 }
@@ -599,7 +598,10 @@ func OnAfterFileEdit(handler FileEditHandler) {
 	// Cascade postWriteCode
 	Register("cascade-post-write-code", func() {
 		Run(func(input cascade.PostWriteCodeInput) cascade.PostWriteCodeOutput {
-			edits := []FileEdit{{OldString: "", NewString: input.ToolInfo.Content}}
+			var edits []FileEdit
+			for _, e := range input.ToolInfo.Edits {
+				edits = append(edits, FileEdit{OldString: e.OldString, NewString: e.NewString})
+			}
 
 			ctx := FileEditContext{
 				Platform:   PlatformCascade,
@@ -732,20 +734,22 @@ func OnPromptSubmit(handler PromptHandler) {
 	})
 
 	// Cascade preUserPrompt
+	// Uses RunE so that blocking decisions exit with code 2, which is how
+	// Windsurf Cascade detects that a hook has denied an action.
 	Register("cascade-pre-user-prompt", func() {
-		Run(func(input cascade.PreUserPromptInput) cascade.PreUserPromptOutput {
+		RunE(func(input cascade.PreUserPromptInput) (cascade.PreUserPromptOutput, error) {
 			ctx := PromptContext{
 				Platform:   PlatformCascade,
 				SessionID:  input.TrajectoryID,
-				Prompt:     input.ToolInfo.Prompt,
+				Prompt:     input.ToolInfo.UserPrompt,
 				RawCascade: &input,
 			}
 
 			decision := handler(ctx)
 			if !decision.Allow {
-				return cascade.BlockPrompt(decision.Reason)
+				return cascade.PreUserPromptOutput{}, errors.New(decision.Reason)
 			}
-			return cascade.AllowPrompt()
+			return cascade.AllowPrompt(), nil
 		})
 	})
 }

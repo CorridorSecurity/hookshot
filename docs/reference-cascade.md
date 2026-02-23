@@ -94,16 +94,20 @@ func AskCommand(message string) PreRunCommandOutput
 
 ### Example
 
+Cascade uses exit code 2 to block actions, so pre-hooks should use `RunE`. When the handler returns an error, the process exits with code 2 and Cascade blocks the action.
+
 ```go
 hookshot.Register("cascade-pre-run-command", func() {
-    hookshot.Run(func(input cascade.PreRunCommandInput) cascade.PreRunCommandOutput {
+    hookshot.RunE(func(input cascade.PreRunCommandInput) (cascade.PreRunCommandOutput, error) {
         if strings.Contains(input.ToolInfo.CommandLine, "rm -rf /") {
-            return cascade.DenyCommand("Dangerous command blocked")
+            return cascade.PreRunCommandOutput{}, fmt.Errorf("Dangerous command blocked")
         }
-        return cascade.AllowCommand()
+        return cascade.AllowCommand(), nil
     })
 })
 ```
+
+> **Note:** The unified handler `OnBeforeExecution` already handles this correctly — it uses `RunE` for Cascade pre-hooks automatically. You only need `Register` for Cascade-specific hooks not covered by the unified API.
 
 ---
 
@@ -148,9 +152,14 @@ Called before writing a file.
 ### PreWriteCodeInput
 
 ```go
+type CascadeEdit struct {
+    OldString string `json:"old_string"`
+    NewString string `json:"new_string"`
+}
+
 type PreWriteCodeToolInfo struct {
-    FilePath string `json:"file_path"`
-    Content  string `json:"content"`
+    FilePath string        `json:"file_path"`
+    Edits    []CascadeEdit `json:"edits"`
 }
 
 type PreWriteCodeInput struct {
@@ -179,11 +188,11 @@ func AskWrite(message string) PreWriteCodeOutput
 
 ```go
 hookshot.Register("cascade-pre-write-code", func() {
-    hookshot.Run(func(input cascade.PreWriteCodeInput) cascade.PreWriteCodeOutput {
+    hookshot.RunE(func(input cascade.PreWriteCodeInput) (cascade.PreWriteCodeOutput, error) {
         if strings.HasSuffix(input.ToolInfo.FilePath, ".env") {
-            return cascade.DenyWrite("Cannot write to .env files")
+            return cascade.PreWriteCodeOutput{}, fmt.Errorf("Cannot write to .env files")
         }
-        return cascade.AllowWrite()
+        return cascade.AllowWrite(), nil
     })
 })
 ```
@@ -198,8 +207,8 @@ Called after writing a file.
 
 ```go
 type PostWriteCodeToolInfo struct {
-    FilePath string `json:"file_path"`
-    Content  string `json:"content"`
+    FilePath string        `json:"file_path"`
+    Edits    []CascadeEdit `json:"edits"`
 }
 
 type PostWriteCodeInput struct {
@@ -259,11 +268,11 @@ func AskRead(message string) PreReadCodeOutput
 
 ```go
 hookshot.Register("cascade-pre-read-code", func() {
-    hookshot.Run(func(input cascade.PreReadCodeInput) cascade.PreReadCodeOutput {
+    hookshot.RunE(func(input cascade.PreReadCodeInput) (cascade.PreReadCodeOutput, error) {
         if strings.Contains(input.ToolInfo.FilePath, "secrets") {
-            return cascade.DenyRead("Cannot read secret files")
+            return cascade.PreReadCodeOutput{}, fmt.Errorf("Cannot read secret files")
         }
-        return cascade.AllowRead()
+        return cascade.AllowRead(), nil
     })
 })
 ```
@@ -310,9 +319,9 @@ Called before an MCP tool executes.
 
 ```go
 type PreMCPToolUseToolInfo struct {
-    ToolName  string `json:"tool_name"`
-    ToolInput string `json:"tool_input"` // JSON string of parameters
-    ServerURL string `json:"server_url,omitempty"`
+    MCPServerName    string          `json:"mcp_server_name"`
+    MCPToolName      string          `json:"mcp_tool_name"`
+    MCPToolArguments json.RawMessage `json:"mcp_tool_arguments"`
 }
 
 type PreMCPToolUseInput struct {
@@ -341,11 +350,11 @@ func AskMCP(message string) PreMCPToolUseOutput
 
 ```go
 hookshot.Register("cascade-pre-mcp-tool-use", func() {
-    hookshot.Run(func(input cascade.PreMCPToolUseInput) cascade.PreMCPToolUseOutput {
-        if strings.Contains(input.ToolInfo.ServerURL, "blocked.com") {
-            return cascade.DenyMCP("MCP server not allowed")
+    hookshot.RunE(func(input cascade.PreMCPToolUseInput) (cascade.PreMCPToolUseOutput, error) {
+        if input.ToolInfo.MCPServerName == "blocked-server" {
+            return cascade.PreMCPToolUseOutput{}, fmt.Errorf("MCP server not allowed")
         }
-        return cascade.AllowMCP()
+        return cascade.AllowMCP(), nil
     })
 })
 ```
@@ -360,9 +369,10 @@ Called after an MCP tool executes.
 
 ```go
 type PostMCPToolUseToolInfo struct {
-    ToolName   string `json:"tool_name"`
-    ToolInput  string `json:"tool_input"`
-    ToolOutput string `json:"tool_output,omitempty"`
+    MCPServerName    string          `json:"mcp_server_name"`
+    MCPToolName      string          `json:"mcp_tool_name"`
+    MCPToolArguments json.RawMessage `json:"mcp_tool_arguments"`
+    MCPResult        string          `json:"mcp_result,omitempty"`
 }
 
 type PostMCPToolUseInput struct {
@@ -393,7 +403,7 @@ Called when the user submits a prompt.
 
 ```go
 type PreUserPromptToolInfo struct {
-    Prompt string `json:"prompt"`
+    UserPrompt string `json:"user_prompt"`
 }
 
 type PreUserPromptInput struct {
@@ -421,11 +431,11 @@ func BlockPrompt(message string) PreUserPromptOutput
 
 ```go
 hookshot.Register("cascade-pre-user-prompt", func() {
-    hookshot.Run(func(input cascade.PreUserPromptInput) cascade.PreUserPromptOutput {
-        if strings.Contains(input.ToolInfo.Prompt, "api_key=") {
-            return cascade.BlockPrompt("Don't include API keys in prompts")
+    hookshot.RunE(func(input cascade.PreUserPromptInput) (cascade.PreUserPromptOutput, error) {
+        if strings.Contains(input.ToolInfo.UserPrompt, "api_key=") {
+            return cascade.PreUserPromptOutput{}, fmt.Errorf("Don't include API keys in prompts")
         }
-        return cascade.AllowPrompt()
+        return cascade.AllowPrompt(), nil
     })
 })
 ```

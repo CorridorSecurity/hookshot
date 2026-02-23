@@ -4,6 +4,8 @@
 // points in the agent loop. See Windsurf documentation for details.
 package cascade
 
+import "encoding/json"
+
 // =============================================================================
 // Common Types
 // =============================================================================
@@ -72,10 +74,16 @@ type PostRunCommandOutput struct{}
 // PreWriteCode
 // =============================================================================
 
+// CascadeEdit represents a single edit operation in Cascade write hooks.
+type CascadeEdit struct {
+	OldString string `json:"old_string"`
+	NewString string `json:"new_string"`
+}
+
 // PreWriteCodeToolInfo contains details about the file write operation.
 type PreWriteCodeToolInfo struct {
-	FilePath string `json:"file_path"`
-	Content  string `json:"content"`
+	FilePath string        `json:"file_path"`
+	Edits    []CascadeEdit `json:"edits"`
 }
 
 // PreWriteCodeInput is received before writing a code file.
@@ -95,8 +103,8 @@ type PreWriteCodeOutput struct {
 
 // PostWriteCodeToolInfo contains details about the written file.
 type PostWriteCodeToolInfo struct {
-	FilePath string `json:"file_path"`
-	Content  string `json:"content"`
+	FilePath string        `json:"file_path"`
+	Edits    []CascadeEdit `json:"edits"`
 }
 
 // PostWriteCodeInput is received after writing a code file.
@@ -153,9 +161,9 @@ type PostReadCodeOutput struct{}
 
 // PreMCPToolUseToolInfo contains details about the MCP tool call.
 type PreMCPToolUseToolInfo struct {
-	ToolName  string `json:"tool_name"`
-	ToolInput string `json:"tool_input"` // JSON string of parameters
-	ServerURL string `json:"server_url,omitempty"`
+	MCPServerName    string          `json:"mcp_server_name"`
+	MCPToolName      string          `json:"mcp_tool_name"`
+	MCPToolArguments json.RawMessage `json:"mcp_tool_arguments"`
 }
 
 // PreMCPToolUseInput is received before an MCP tool executes.
@@ -175,9 +183,10 @@ type PreMCPToolUseOutput struct {
 
 // PostMCPToolUseToolInfo contains details about the executed MCP tool.
 type PostMCPToolUseToolInfo struct {
-	ToolName   string `json:"tool_name"`
-	ToolInput  string `json:"tool_input"`
-	ToolOutput string `json:"tool_output,omitempty"`
+	MCPServerName    string          `json:"mcp_server_name"`
+	MCPToolName      string          `json:"mcp_tool_name"`
+	MCPToolArguments json.RawMessage `json:"mcp_tool_arguments"`
+	MCPResult        string          `json:"mcp_result,omitempty"`
 }
 
 // PostMCPToolUseInput is received after an MCP tool executes.
@@ -195,7 +204,7 @@ type PostMCPToolUseOutput struct{}
 
 // PreUserPromptToolInfo contains details about the user's prompt.
 type PreUserPromptToolInfo struct {
-	Prompt string `json:"prompt"`
+	UserPrompt string `json:"user_prompt"`
 }
 
 // PreUserPromptInput is received when the user submits a prompt.

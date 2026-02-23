@@ -99,14 +99,14 @@ hookshot install --binary /path/to/my-hooks
 
 ## Unified Handlers
 
-Write once, run on both platforms:
+Write once, run on all four platforms:
 
-| Handler | Claude Code | Cursor |
-|---------|-------------|--------|
-| `OnStop` | Stop | stop |
-| `OnBeforeExecution` | PreToolUse | beforeShellExecution, beforeMCPExecution |
-| `OnAfterFileEdit` | PostToolUse | afterFileEdit |
-| `OnPromptSubmit` | UserPromptSubmit | beforeSubmitPrompt |
+| Handler | Claude Code | Cursor | Windsurf Cascade | Factory Droid |
+|---------|-------------|--------|------------------|---------------|
+| `OnStop` | Stop | stop | post-cascade-response | Stop |
+| `OnBeforeExecution` | PreToolUse | beforeShellExecution, beforeMCPExecution | pre-run-command, pre-mcp-tool-use | PreToolUse |
+| `OnAfterFileEdit` | PostToolUse | afterFileEdit | post-write-code | PostToolUse |
+| `OnPromptSubmit` | UserPromptSubmit | beforeSubmitPrompt | pre-user-prompt | UserPromptSubmit |
 
 ## Platform-Specific Handlers
 
@@ -127,10 +127,10 @@ hookshot.Register("cursor-before-tab-read", func() {
     })
 })
 
-// Windsurf Cascade: Pre-run command
-hookshot.Register("cascade-pre-run-command", func() {
-    hookshot.Run(func(input cascade.PreRunCommandInput) cascade.PreRunCommandOutput {
-        return cascade.AllowCommand()
+// Windsurf Cascade: Pre-write-code (not covered by unified API)
+hookshot.Register("cascade-pre-write-code", func() {
+    hookshot.RunE(func(input cascade.PreWriteCodeInput) (cascade.PreWriteCodeOutput, error) {
+        return cascade.AllowWrite(), nil
     })
 })
 

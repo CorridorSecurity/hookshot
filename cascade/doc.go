@@ -52,7 +52,7 @@
 // PreUserPrompt hooks validate or modify user prompts:
 //
 //	hookshot.Run(func(input cascade.PreUserPromptInput) cascade.PreUserPromptOutput {
-//	    if containsSecrets(input.ToolInfo.Prompt) {
+//	    if containsSecrets(input.ToolInfo.UserPrompt) {
 //	        return cascade.BlockPrompt("Please don't include secrets in prompts")
 //	    }
 //	    return cascade.AllowPrompt()
