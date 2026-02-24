@@ -12,8 +12,10 @@ import (
 type Platform string
 
 const (
-	PlatformClaude Platform = "claude"
-	PlatformCursor Platform = "cursor"
+	PlatformClaude  Platform = "claude"
+	PlatformCursor  Platform = "cursor"
+	PlatformDroid   Platform = "droid"
+	PlatformCascade Platform = "cascade"
 )
 
 // =============================================================================
@@ -37,7 +39,7 @@ type StopContext struct {
 // ShouldSkip returns true if the stop hook should be skipped to prevent loops.
 // For Claude Code, this checks StopHookActive. For Cursor, this checks LoopCount >= 3.
 func (c StopContext) ShouldSkip() bool {
-	if c.Platform == PlatformClaude {
+	if c.Platform == PlatformClaude || c.Platform == PlatformDroid {
 		return c.StopHookActive
 	}
 	return c.LoopCount >= 3
@@ -100,6 +102,22 @@ func OnStop(handler StopHandler) {
 				return cursor.Continue()
 			}
 			return cursor.Followup(decision.Message)
+		})
+	})
+
+	Register("droid-stop", func() {
+		Run(func(input claude.StopInput) claude.StopOutput {
+			ctx := StopContext{
+				Platform:       PlatformDroid,
+				SessionID:      input.SessionID,
+				Cwd:            input.Cwd,
+				StopHookActive: input.StopHookActive,
+			}
+			decision := handler(ctx)
+			if decision.Continue {
+				return claude.Continue()
+			}
+			return claude.Block(decision.Message)
 		})
 	})
 }
@@ -284,6 +302,51 @@ func OnBeforeExecution(handler ExecutionHandler) {
 			return cursor.Deny(decision.Reason, decision.Reason)
 		})
 	})
+
+	// Droid PreToolUse (same API as Claude Code)
+	Register("droid-pre-tool-use", func() {
+		Run(func(input claude.PreToolUseInput) claude.PreToolUseOutput {
+			var execType ExecutionType
+			if input.ToolName == "Bash" {
+				execType = ExecutionShell
+			} else if len(input.ToolName) > 5 && input.ToolName[:5] == "mcp__" {
+				execType = ExecutionMCP
+			} else {
+				execType = ExecutionTool
+			}
+
+			var command string
+			if execType == ExecutionShell {
+				var bashInput struct {
+					Command string `json:"command"`
+				}
+				json.Unmarshal(input.ToolInput, &bashInput)
+				command = bashInput.Command
+			}
+
+			ctx := ExecutionContext{
+				Platform:      PlatformDroid,
+				Type:          execType,
+				Command:       command,
+				Cwd:           input.Cwd,
+				ToolName:      input.ToolName,
+				ToolInput:     input.ToolInput,
+				RawClaudeCode: &input,
+			}
+
+			decision := handler(ctx)
+			if decision.Allow {
+				if decision.Reason != "" {
+					return claude.Allow(decision.Reason)
+				}
+				return claude.AllowSilent()
+			}
+			if decision.Ask {
+				return claude.Ask(decision.Reason)
+			}
+			return claude.Deny(decision.Reason)
+		})
+	})
 }
 
 // =============================================================================
@@ -410,6 +473,48 @@ func OnAfterFileEdit(handler FileEditHandler) {
 			return cursor.AfterFileEditOK()
 		})
 	})
+
+	// Droid PostToolUse for Write/Edit (same API as Claude Code)
+	Register("droid-after-file-edit", func() {
+		Run(func(input claude.PostToolUseInput) claude.PostToolUseOutput {
+			if input.ToolName != "Write" && input.ToolName != "Edit" {
+				return claude.PostToolOK()
+			}
+
+			var toolInput struct {
+				FilePath  string `json:"file_path"`
+				Content   string `json:"content"`
+				OldString string `json:"old_string"`
+				NewString string `json:"new_string"`
+			}
+			json.Unmarshal(input.ToolInput, &toolInput)
+
+			var edits []FileEdit
+			if input.ToolName == "Edit" {
+				edits = []FileEdit{{OldString: toolInput.OldString, NewString: toolInput.NewString}}
+			} else {
+				edits = []FileEdit{{OldString: "", NewString: toolInput.Content}}
+			}
+
+			ctx := FileEditContext{
+				Platform:      PlatformDroid,
+				SessionID:     input.SessionID,
+				FilePath:      toolInput.FilePath,
+				Edits:         edits,
+				Cwd:           input.Cwd,
+				RawClaudeCode: &input,
+			}
+
+			decision := handler(ctx)
+			if decision.Block {
+				return claude.PostToolBlock(decision.Reason)
+			}
+			if decision.Context != "" {
+				return claude.PostToolContext(decision.Context)
+			}
+			return claude.PostToolOK()
+		})
+	})
 }
 
 // =============================================================================
@@ -498,6 +603,27 @@ func OnPromptSubmit(handler PromptHandler) {
 				return cursor.BlockPrompt(decision.Reason)
 			}
 			return cursor.AllowPrompt()
+		})
+	})
+
+	// Droid UserPromptSubmit (same API as Claude Code)
+	Register("droid-user-prompt-submit", func() {
+		Run(func(input claude.UserPromptSubmitInput) claude.UserPromptSubmitOutput {
+			ctx := PromptContext{
+				Platform:      PlatformDroid,
+				SessionID:     input.SessionID,
+				Prompt:        input.Prompt,
+				RawClaudeCode: &input,
+			}
+
+			decision := handler(ctx)
+			if !decision.Allow {
+				return claude.BlockPrompt(decision.Reason)
+			}
+			if decision.Context != "" {
+				return claude.AddContext(decision.Context)
+			}
+			return claude.AllowPrompt()
 		})
 	})
 }
