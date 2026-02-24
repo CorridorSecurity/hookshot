@@ -33,6 +33,26 @@
 //	    "beforeTabFileRead": [{ "command": "/path/to/my-hooks cursor-before-tab-read" }]
 //	  }
 //	}
+//
+// Configure in Windsurf Cascade (hooks.json in workspace):
+//
+//	{
+//	  "hooks": {
+//	    "pre-run-command": { "command": "/path/to/my-hooks cascade-pre-run-command" },
+//	    "pre-write-code": { "command": "/path/to/my-hooks cascade-pre-write-code" },
+//	    "pre-user-prompt": { "command": "/path/to/my-hooks cascade-pre-user-prompt" }
+//	  }
+//	}
+//
+// Configure in Factory Droid (similar to Claude Code):
+//
+//	{
+//	  "hooks": {
+//	    "Stop": [{ "command": "/path/to/my-hooks droid-stop" }],
+//	    "PreToolUse": [{ "matcher": "*", "command": "/path/to/my-hooks droid-pre-tool-use" }],
+//	    "UserPromptSubmit": [{ "command": "/path/to/my-hooks droid-user-prompt-submit" }]
+//	  }
+//	}
 package main
 
 import (
@@ -40,6 +60,7 @@ import (
 	"strings"
 
 	"github.com/CorridorSecurity/hookshot"
+	"github.com/CorridorSecurity/hookshot/cascade"
 	"github.com/CorridorSecurity/hookshot/claude"
 	"github.com/CorridorSecurity/hookshot/cursor"
 )
@@ -47,7 +68,8 @@ import (
 func main() {
 	// ==========================================================================
 	// UNIFIED HANDLERS
-	// Write once, works on both Claude Code and Cursor automatically.
+	// Write once, works on Claude Code, Cursor, Windsurf Cascade, and
+	// Factory Droid automatically.
 	// ==========================================================================
 
 	hookshot.OnStop(handleStop)
@@ -65,6 +87,14 @@ func main() {
 
 	// Cursor only: Tab completion file read (Claude Code has no equivalent)
 	hookshot.Register("cursor-before-tab-read", handleCursorBeforeTabRead)
+
+	// ==========================================================================
+	// WINDSURF CASCADE: pre-write-code (no unified equivalent)
+	// Other Cascade hooks (pre-run-command, pre-mcp-tool-use, pre-user-prompt,
+	// post-cascade-response, post-write-code) are covered by unified handlers.
+	// ==========================================================================
+
+	hookshot.Register("cascade-pre-write-code", handleCascadePreWriteCode)
 
 	hookshot.RunCommand()
 }
@@ -160,5 +190,21 @@ func handleCursorBeforeTabRead() {
 			return cursor.DenyTabRead()
 		}
 		return cursor.AllowTabRead()
+	})
+}
+
+// =============================================================================
+// PLATFORM-SPECIFIC: Windsurf Cascade pre-write-code
+// No unified equivalent exists for this hook.
+// Cascade uses exit code 2 to block actions, so we use RunE with errors.
+// =============================================================================
+
+func handleCascadePreWriteCode() {
+	hookshot.RunE(func(input cascade.PreWriteCodeInput) (cascade.PreWriteCodeOutput, error) {
+		// Block writes to sensitive files
+		if strings.HasSuffix(input.ToolInfo.FilePath, ".env") {
+			return cascade.PreWriteCodeOutput{}, fmt.Errorf("Cannot write to .env files")
+		}
+		return cascade.AllowWrite(), nil
 	})
 }

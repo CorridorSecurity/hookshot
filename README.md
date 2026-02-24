@@ -1,6 +1,6 @@
 # hookshot
 
-A Go library for building hooks for AI coding agents like [Cursor](https://cursor.com/docs/agent/hooks) and [Claude Code](https://docs.claude.com/en/docs/claude-code/hooks).
+A Go library for building hooks for AI coding agents like [Cursor](https://cursor.com/docs/agent/hooks), [Claude Code](https://docs.claude.com/en/docs/claude-code/hooks), [Windsurf Cascade](https://docs.codeium.com/windsurf/memories#hooks), and [Factory Droid](https://docs.factory.ai/reference/hooks-reference).
 
 Hooks are a key component of [Agentic Coding Security Management (ACSM)](https://corridor.dev/blog/introducing-acsm/) — they let you observe, control, and secure AI agent behavior in your development environment.
 
@@ -99,14 +99,14 @@ hookshot install --binary /path/to/my-hooks
 
 ## Unified Handlers
 
-Write once, run on both platforms:
+Write once, run on all four platforms:
 
-| Handler | Claude Code | Cursor |
-|---------|-------------|--------|
-| `OnStop` | Stop | stop |
-| `OnBeforeExecution` | PreToolUse | beforeShellExecution, beforeMCPExecution |
-| `OnAfterFileEdit` | PostToolUse | afterFileEdit |
-| `OnPromptSubmit` | UserPromptSubmit | beforeSubmitPrompt |
+| Handler | Claude Code | Cursor | Windsurf Cascade | Factory Droid |
+|---------|-------------|--------|------------------|---------------|
+| `OnStop` | Stop | stop | post-cascade-response | Stop |
+| `OnBeforeExecution` | PreToolUse | beforeShellExecution, beforeMCPExecution | pre-run-command, pre-mcp-tool-use | PreToolUse |
+| `OnAfterFileEdit` | PostToolUse | afterFileEdit | post-write-code | PostToolUse |
+| `OnPromptSubmit` | UserPromptSubmit | beforeSubmitPrompt | pre-user-prompt | UserPromptSubmit |
 
 ## Platform-Specific Handlers
 
@@ -126,6 +126,20 @@ hookshot.Register("cursor-before-tab-read", func() {
         return cursor.AllowTabRead()
     })
 })
+
+// Windsurf Cascade: Pre-write-code (not covered by unified API)
+hookshot.Register("cascade-pre-write-code", func() {
+    hookshot.RunE(func(input cascade.PreWriteCodeInput) (cascade.PreWriteCodeOutput, error) {
+        return cascade.AllowWrite(), nil
+    })
+})
+
+// Factory Droid: Pre-tool use
+hookshot.Register("droid-pre-tool-use", func() {
+    hookshot.Run(func(input droid.PreToolUseInput) droid.PreToolUseOutput {
+        return droid.PassThrough()
+    })
+})
 ```
 
 ## Documentation
@@ -133,6 +147,8 @@ hookshot.Register("cursor-before-tab-read", func() {
 - [Unified API Reference](docs/reference-unified.md)
 - [Claude Code Reference](docs/reference-claude.md)
 - [Cursor Reference](docs/reference-cursor.md)
+- [Windsurf Cascade Reference](docs/reference-cascade.md)
+- [Factory Droid Reference](docs/reference-droid.md)
 
 Full API documentation is available via godoc:
 
@@ -140,6 +156,8 @@ Full API documentation is available via godoc:
 go doc github.com/CorridorSecurity/hookshot
 go doc github.com/CorridorSecurity/hookshot/claude
 go doc github.com/CorridorSecurity/hookshot/cursor
+go doc github.com/CorridorSecurity/hookshot/cascade
+go doc github.com/CorridorSecurity/hookshot/droid
 ```
 
 Or view online at [pkg.go.dev/github.com/CorridorSecurity/hookshot](https://pkg.go.dev/github.com/CorridorSecurity/hookshot).
