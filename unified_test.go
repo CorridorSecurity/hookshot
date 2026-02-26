@@ -513,6 +513,81 @@ func TestCascadePreHooks_RunE(t *testing.T) {
 	}
 }
 
+// TestDroidPreToolUse_MCPTypeDetection verifies that droid's tool naming convention
+// (serverName___toolName) is correctly classified as ExecutionMCP.
+func TestDroidPreToolUse_MCPTypeDetection(t *testing.T) {
+	if handler := os.Getenv("HOOKSHOT_TEST_DROID_MCP_HANDLER"); handler != "" {
+		var capturedType ExecutionType
+		ClearHandlers()
+		OnBeforeExecution(func(ctx ExecutionContext) ExecutionDecision {
+			capturedType = ctx.Type
+			// Write the detected type to stdout so the parent can verify
+			os.Stdout.WriteString("type=" + string(capturedType))
+			return AllowExecution()
+		})
+		handlers[handler]()
+		return
+	}
+
+	tests := []struct {
+		name      string
+		stdinJSON string
+		wantType  string
+	}{
+		{
+			name:      "Droid MCP tool with ___ delimiter",
+			stdinJSON: `{"session_id":"test","tool_name":"corridor___listProjects","tool_input":{},"cwd":"/tmp"}`,
+			wantType:  "type=mcp",
+		},
+		{
+			name:      "Droid MCP tool with mcp__ prefix",
+			stdinJSON: `{"session_id":"test","tool_name":"mcp__context7__query","tool_input":{},"cwd":"/tmp"}`,
+			wantType:  "type=mcp",
+		},
+		{
+			name:      "Droid built-in tool",
+			stdinJSON: `{"session_id":"test","tool_name":"Read","tool_input":{},"cwd":"/tmp"}`,
+			wantType:  "type=tool",
+		},
+		{
+			name:      "Droid Bash tool",
+			stdinJSON: `{"session_id":"test","tool_name":"Bash","tool_input":{"command":"ls"},"cwd":"/tmp"}`,
+			wantType:  "type=shell",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cmd := exec.Command(os.Args[0], "-test.run=^TestDroidPreToolUse_MCPTypeDetection$")
+			cmd.Env = append(os.Environ(),
+				"HOOKSHOT_TEST_DROID_MCP_HANDLER=droid-pre-tool-use",
+			)
+			cmd.Stdin = strings.NewReader(tt.stdinJSON)
+			var stdout, stderr bytes.Buffer
+			cmd.Stdout = &stdout
+			cmd.Stderr = &stderr
+
+			err := cmd.Run()
+			exitCode := 0
+			if exitErr, ok := err.(*exec.ExitError); ok {
+				exitCode = exitErr.ExitCode()
+			} else if err != nil {
+				t.Fatalf("unexpected error: %v (stderr: %s)", err, stderr.String())
+			}
+
+			if exitCode != 0 {
+				t.Fatalf("exit code = %d, want 0 (stderr: %s)", exitCode, stderr.String())
+			}
+
+			// The handler writes the type to stdout, but the droid output JSON
+			// may also be written. Check that our type marker is present.
+			if !strings.Contains(stdout.String(), tt.wantType) {
+				t.Errorf("stdout = %q, want substring %q", stdout.String(), tt.wantType)
+			}
+		})
+	}
+}
+
 func TestExecutionContext_ToolInput_JSON(t *testing.T) {
 	toolInput := json.RawMessage(`{"file_path":"/test.ts"}`)
 	ctx := ExecutionContext{

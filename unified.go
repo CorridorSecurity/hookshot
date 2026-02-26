@@ -3,6 +3,7 @@ package hookshot
 import (
 	"encoding/json"
 	"errors"
+	"strings"
 
 	"github.com/CorridorSecurity/hookshot/cascade"
 	"github.com/CorridorSecurity/hookshot/claude"
@@ -337,10 +338,14 @@ func OnBeforeExecution(handler ExecutionHandler) {
 	Register("droid-pre-tool-use", func() {
 		RunE(func(input droid.PreToolUseInput) (droid.PreToolUseOutput, error) {
 			// Determine execution type
+			// Droid MCP tools use serverName___toolName format (e.g. corridor___listProjects)
+			// unlike Claude's mcp__server__tool format
 			var execType ExecutionType
 			if input.ToolName == "Bash" {
 				execType = ExecutionShell
 			} else if len(input.ToolName) > 5 && input.ToolName[:5] == "mcp__" {
+				execType = ExecutionMCP
+			} else if strings.Contains(input.ToolName, "___") {
 				execType = ExecutionMCP
 			} else {
 				execType = ExecutionTool
