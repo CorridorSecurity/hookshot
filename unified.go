@@ -565,17 +565,18 @@ func OnAfterFileEdit(handler FileEditHandler) {
 			}
 
 			// Extract file path and edits from tool input
+			// Factory Droid uses "old_str"/"new_str" (not "old_string"/"new_string" like Claude Code)
 			var toolInput struct {
-				FilePath  string `json:"file_path"`
-				Content   string `json:"content"`
-				OldString string `json:"old_string"`
-				NewString string `json:"new_string"`
+				FilePath string `json:"file_path"`
+				Content  string `json:"content"`
+				OldStr   string `json:"old_str"`
+				NewStr   string `json:"new_str"`
 			}
 			json.Unmarshal(input.ToolInput, &toolInput)
 
 			var edits []FileEdit
 			if input.ToolName == "Edit" {
-				edits = []FileEdit{{OldString: toolInput.OldString, NewString: toolInput.NewString}}
+				edits = []FileEdit{{OldString: toolInput.OldStr, NewString: toolInput.NewStr}}
 			} else {
 				edits = []FileEdit{{OldString: "", NewString: toolInput.Content}}
 			}
