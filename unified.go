@@ -565,17 +565,28 @@ func OnAfterFileEdit(handler FileEditHandler) {
 			}
 
 			// Extract file path and edits from tool input
+			// Factory Droid uses "old_str"/"new_str" while Claude Code uses "old_string"/"new_string"
 			var toolInput struct {
 				FilePath  string `json:"file_path"`
 				Content   string `json:"content"`
 				OldString string `json:"old_string"`
 				NewString string `json:"new_string"`
+				OldStr    string `json:"old_str"`
+				NewStr    string `json:"new_str"`
 			}
 			json.Unmarshal(input.ToolInput, &toolInput)
 
+			// Prefer old_str/new_str (Factory) over old_string/new_string (Claude Code)
+			oldString := toolInput.OldString
+			newString := toolInput.NewString
+			if toolInput.OldStr != "" || toolInput.NewStr != "" {
+				oldString = toolInput.OldStr
+				newString = toolInput.NewStr
+			}
+
 			var edits []FileEdit
 			if input.ToolName == "Edit" {
-				edits = []FileEdit{{OldString: toolInput.OldString, NewString: toolInput.NewString}}
+				edits = []FileEdit{{OldString: oldString, NewString: newString}}
 			} else {
 				edits = []FileEdit{{OldString: "", NewString: toolInput.Content}}
 			}
