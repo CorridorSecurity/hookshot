@@ -90,6 +90,18 @@ func Ask(reason string) PreToolUseOutput {
 	}
 }
 
+// AllowWithContext permits the tool and adds context for Claude.
+func AllowWithContext(reason, context string) PreToolUseOutput {
+	return PreToolUseOutput{
+		HookSpecificOutput: &PreToolUseHookOutput{
+			HookEventName:            "PreToolUse",
+			PermissionDecision:       "allow",
+			PermissionDecisionReason: reason,
+			AdditionalContext:        context,
+		},
+	}
+}
+
 // PassThrough returns an empty output, letting the normal permission flow proceed.
 func PassThrough() PreToolUseOutput {
 	return PreToolUseOutput{}
@@ -119,6 +131,20 @@ func AllowPermissionWithInput(updatedInput map[string]any) PermissionRequestOutp
 			Decision: &PermissionRequestDecision{
 				Behavior:     "allow",
 				UpdatedInput: updatedInput,
+			},
+		},
+	}
+}
+
+// AllowPermissionWithPermissions grants the permission and applies permission rule updates
+// (equivalent to the user selecting an "always allow" option).
+func AllowPermissionWithPermissions(updatedPermissions any) PermissionRequestOutput {
+	return PermissionRequestOutput{
+		HookSpecificOutput: &PermissionRequestHookOutput{
+			HookEventName: "PermissionRequest",
+			Decision: &PermissionRequestDecision{
+				Behavior:           "allow",
+				UpdatedPermissions: updatedPermissions,
 			},
 		},
 	}
@@ -174,6 +200,16 @@ func PostToolContext(context string) PostToolUseOutput {
 		HookSpecificOutput: &PostToolUseHookOutput{
 			HookEventName:     "PostToolUse",
 			AdditionalContext: context,
+		},
+	}
+}
+
+// PostToolReplaceMCPOutput replaces an MCP tool's output with the provided value.
+func PostToolReplaceMCPOutput(output any) PostToolUseOutput {
+	return PostToolUseOutput{
+		HookSpecificOutput: &PostToolUseHookOutput{
+			HookEventName:        "PostToolUse",
+			UpdatedMCPToolOutput: output,
 		},
 	}
 }
@@ -240,6 +276,16 @@ func SessionEndOK() SessionEndOutput {
 // NotificationOK returns an empty output for notifications.
 func NotificationOK() NotificationOutput {
 	return NotificationOutput{}
+}
+
+// NotificationContext adds context to the conversation from a notification hook.
+func NotificationContext(context string) NotificationOutput {
+	return NotificationOutput{
+		HookSpecificOutput: &NotificationHookOutput{
+			HookEventName:     "Notification",
+			AdditionalContext: context,
+		},
+	}
 }
 
 // =============================================================================
