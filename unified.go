@@ -30,7 +30,7 @@ const (
 type StopContext struct {
 	Platform  Platform
 	SessionID string // Claude Code: session_id, Cursor: conversation_id
-	Cwd       string // Working directory (Claude Code only, empty for Cursor)
+	Cwd       string // Working directory (all platforms)
 
 	// Claude Code-specific fields
 	StopHookActive bool // True if already continuing from a previous stop hook
@@ -104,6 +104,7 @@ func OnStop(handler StopHandler) {
 			ctx := StopContext{
 				Platform:  PlatformCursor,
 				SessionID: input.ConversationID,
+				Cwd:       cursorWorkspaceRoot(input.WorkspaceRoots),
 				Status:    input.Status,
 				LoopCount: input.LoopCount,
 			}
@@ -283,11 +284,15 @@ func OnBeforeExecution(handler ExecutionHandler) {
 	// Cursor beforeShellExecution
 	Register("cursor-before-shell", func() {
 		Run(func(input cursor.BeforeShellExecutionInput) cursor.BeforeExecutionOutput {
+			cwd := input.Cwd
+			if cwd == "" {
+				cwd = cursorWorkspaceRoot(input.WorkspaceRoots)
+			}
 			ctx := ExecutionContext{
 				Platform:  PlatformCursor,
 				Type:      ExecutionShell,
 				Command:   input.Command,
-				Cwd:       input.Cwd,
+				Cwd:       cwd,
 				RawCursor: &input,
 			}
 
@@ -315,6 +320,7 @@ func OnBeforeExecution(handler ExecutionHandler) {
 				ToolInput: json.RawMessage(input.ToolInput),
 				ServerURL: input.URL,
 				Command:   input.Command, // For local MCP servers (command-based)
+				Cwd:       cursorWorkspaceRoot(input.WorkspaceRoots),
 				RawCursor: &input,
 			}
 
@@ -546,6 +552,7 @@ func OnAfterFileEdit(handler FileEditHandler) {
 				SessionID: input.ConversationID,
 				FilePath:  input.FilePath,
 				Edits:     edits,
+				Cwd:       cursorWorkspaceRoot(input.WorkspaceRoots),
 				RawCursor: &input,
 			}
 
@@ -634,6 +641,7 @@ type PromptContext struct {
 	Platform  Platform
 	SessionID string // Claude Code: session_id, Cursor: conversation_id, Cascade: trajectory_id
 	Prompt    string
+	Cwd       string // Working directory (Cursor: from workspace_roots[0])
 
 	// Raw input for advanced use cases
 	RawClaudeCode *claude.UserPromptSubmitInput
@@ -707,6 +715,7 @@ func OnPromptSubmit(handler PromptHandler) {
 				Platform:  PlatformCursor,
 				SessionID: input.ConversationID,
 				Prompt:    input.Prompt,
+				Cwd:       cursorWorkspaceRoot(input.WorkspaceRoots),
 				RawCursor: &input,
 			}
 
@@ -769,4 +778,15 @@ func OnPromptSubmit(handler PromptHandler) {
 // in the unified contexts.
 func ReadRawInput(v any) error {
 	return internal.ReadJSON(v)
+}
+
+// cursorWorkspaceRoot returns the first workspace root from a Cursor hook
+// input's workspace_roots array. Cursor launches hooks from its config
+// directory (~/.cursor), so os.Getwd() returns a misleading path. The
+// workspace_roots field always contains the actual project directories.
+func cursorWorkspaceRoot(roots []string) string {
+	if len(roots) > 0 {
+		return roots[0]
+	}
+	return ""
 }
