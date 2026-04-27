@@ -607,3 +607,189 @@ func TestExecutionContext_ToolInput_JSON(t *testing.T) {
 		t.Errorf("file_path = %q, want %q", parsed["file_path"], "/test.ts")
 	}
 }
+
+// =============================================================================
+// Cursor workspace_roots -> ctx.Cwd Tests
+// =============================================================================
+
+func TestCursorWorkspaceRoot(t *testing.T) {
+	tests := []struct {
+		name  string
+		roots []string
+		want  string
+	}{
+		{name: "nil slice returns empty", roots: nil, want: ""},
+		{name: "empty slice returns empty", roots: []string{}, want: ""},
+		{name: "single root returned", roots: []string{"/work/proj"}, want: "/work/proj"},
+		{name: "first of multiple returned", roots: []string{"/a", "/b"}, want: "/a"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := cursorWorkspaceRoot(tt.roots); got != tt.want {
+				t.Errorf("cursorWorkspaceRoot(%v) = %q, want %q", tt.roots, got, tt.want)
+			}
+		})
+	}
+}
+
+// runHandlerWithStdin invokes the named registered handler with the given JSON
+// piped to os.Stdin, discarding anything the handler writes to os.Stdout.
+func runHandlerWithStdin(t *testing.T, name, stdinJSON string) {
+	t.Helper()
+	h, ok := handlers[name]
+	if !ok {
+		t.Fatalf("handler %q not registered", name)
+	}
+
+	stdinR, stdinW, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe: %v", err)
+	}
+	if _, err := stdinW.Write([]byte(stdinJSON)); err != nil {
+		t.Fatalf("write stdin: %v", err)
+	}
+	stdinW.Close()
+	stdoutR, stdoutW, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe: %v", err)
+	}
+	defer stdoutR.Close()
+
+	origStdin, origStdout := os.Stdin, os.Stdout
+	os.Stdin, os.Stdout = stdinR, stdoutW
+	defer func() {
+		stdoutW.Close()
+		os.Stdin, os.Stdout = origStdin, origStdout
+	}()
+
+	h()
+}
+
+func TestOnStop_CursorPopulatesCwd(t *testing.T) {
+	ClearHandlers()
+	defer ClearHandlers()
+
+	var captured StopContext
+	OnStop(func(ctx StopContext) StopDecision {
+		captured = ctx
+		return AllowStop()
+	})
+
+	stdin := `{"conversation_id":"c1","workspace_roots":["/Users/me/proj","/other"],"status":"completed","loop_count":0}`
+	runHandlerWithStdin(t, "cursor-stop", stdin)
+
+	if captured.Platform != PlatformCursor {
+		t.Errorf("Platform = %q, want %q", captured.Platform, PlatformCursor)
+	}
+	if captured.Cwd != "/Users/me/proj" {
+		t.Errorf("Cwd = %q, want %q", captured.Cwd, "/Users/me/proj")
+	}
+}
+
+func TestOnBeforeExecution_CursorShellPrefersInputCwd(t *testing.T) {
+	ClearHandlers()
+	defer ClearHandlers()
+
+	var captured ExecutionContext
+	OnBeforeExecution(func(ctx ExecutionContext) ExecutionDecision {
+		captured = ctx
+		return AllowExecution()
+	})
+
+	stdin := `{"conversation_id":"c1","workspace_roots":["/root/from/ws"],"command":"ls","cwd":"/explicit/cwd"}`
+	runHandlerWithStdin(t, "cursor-before-shell", stdin)
+
+	if captured.Cwd != "/explicit/cwd" {
+		t.Errorf("Cwd = %q, want %q (input.Cwd should win when set)", captured.Cwd, "/explicit/cwd")
+	}
+}
+
+func TestOnBeforeExecution_CursorShellFallsBackToWorkspaceRoot(t *testing.T) {
+	ClearHandlers()
+	defer ClearHandlers()
+
+	var captured ExecutionContext
+	OnBeforeExecution(func(ctx ExecutionContext) ExecutionDecision {
+		captured = ctx
+		return AllowExecution()
+	})
+
+	stdin := `{"conversation_id":"c1","workspace_roots":["/root/from/ws"],"command":"ls","cwd":""}`
+	runHandlerWithStdin(t, "cursor-before-shell", stdin)
+
+	if captured.Cwd != "/root/from/ws" {
+		t.Errorf("Cwd = %q, want %q (should fall back to workspace_roots[0])", captured.Cwd, "/root/from/ws")
+	}
+}
+
+func TestOnBeforeExecution_CursorMCPPopulatesCwd(t *testing.T) {
+	ClearHandlers()
+	defer ClearHandlers()
+
+	var captured ExecutionContext
+	OnBeforeExecution(func(ctx ExecutionContext) ExecutionDecision {
+		captured = ctx
+		return AllowExecution()
+	})
+
+	stdin := `{"conversation_id":"c1","workspace_roots":["/root/from/ws"],"tool_name":"analyze","tool_input":"{}","url":"https://example.com"}`
+	runHandlerWithStdin(t, "cursor-before-mcp", stdin)
+
+	if captured.Cwd != "/root/from/ws" {
+		t.Errorf("Cwd = %q, want %q", captured.Cwd, "/root/from/ws")
+	}
+}
+
+func TestOnAfterFileEdit_CursorPopulatesCwd(t *testing.T) {
+	ClearHandlers()
+	defer ClearHandlers()
+
+	var captured FileEditContext
+	OnAfterFileEdit(func(ctx FileEditContext) FileEditDecision {
+		captured = ctx
+		return FileEditOK()
+	})
+
+	stdin := `{"conversation_id":"c1","workspace_roots":["/root/from/ws"],"file_path":"/x.ts","edits":[{"old_string":"a","new_string":"b"}]}`
+	runHandlerWithStdin(t, "cursor-after-file-edit", stdin)
+
+	if captured.Cwd != "/root/from/ws" {
+		t.Errorf("Cwd = %q, want %q", captured.Cwd, "/root/from/ws")
+	}
+}
+
+func TestOnPromptSubmit_CursorPopulatesCwd(t *testing.T) {
+	ClearHandlers()
+	defer ClearHandlers()
+
+	var captured PromptContext
+	OnPromptSubmit(func(ctx PromptContext) PromptDecision {
+		captured = ctx
+		return AllowPromptDecision()
+	})
+
+	stdin := `{"conversation_id":"c1","workspace_roots":["/root/from/ws"],"prompt":"hi"}`
+	runHandlerWithStdin(t, "cursor-before-submit-prompt", stdin)
+
+	if captured.Cwd != "/root/from/ws" {
+		t.Errorf("Cwd = %q, want %q", captured.Cwd, "/root/from/ws")
+	}
+}
+
+func TestOnStop_CursorEmptyWorkspaceRootsLeavesCwdEmpty(t *testing.T) {
+	ClearHandlers()
+	defer ClearHandlers()
+
+	var captured StopContext
+	OnStop(func(ctx StopContext) StopDecision {
+		captured = ctx
+		return AllowStop()
+	})
+
+	stdin := `{"conversation_id":"c1","workspace_roots":[],"status":"completed","loop_count":0}`
+	runHandlerWithStdin(t, "cursor-stop", stdin)
+
+	if captured.Cwd != "" {
+		t.Errorf("Cwd = %q, want empty", captured.Cwd)
+	}
+}
