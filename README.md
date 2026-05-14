@@ -112,7 +112,7 @@ Then configure the hooks themselves:
 {
   "hooks": {
     "Stop": [{ "hooks": [{ "type": "command", "command": "/path/to/my-hooks codex-stop" }] }],
-    "PreToolUse": [{ "matcher": "Bash|apply_patch", "hooks": [{ "type": "command", "command": "/path/to/my-hooks codex-pre-tool-use" }] }]
+    "PreToolUse": [{ "matcher": "Bash|apply_patch|mcp__.*", "hooks": [{ "type": "command", "command": "/path/to/my-hooks codex-pre-tool-use" }] }]
   }
 }
 ```

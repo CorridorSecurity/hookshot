@@ -60,8 +60,8 @@
 //	{
 //	  "hooks": {
 //	    "Stop": [{ "hooks": [{ "type": "command", "command": "/path/to/my-hooks codex-stop" }] }],
-//	    "PreToolUse": [{ "matcher": "Bash|apply_patch", "hooks": [{ "type": "command", "command": "/path/to/my-hooks codex-pre-tool-use" }] }],
-//	    "PostToolUse": [{ "matcher": "apply_patch|Edit|Write", "hooks": [{ "type": "command", "command": "/path/to/my-hooks codex-post-tool-use" }] }],
+//	    "PreToolUse": [{ "matcher": "Bash|apply_patch|mcp__.*", "hooks": [{ "type": "command", "command": "/path/to/my-hooks codex-pre-tool-use" }] }],
+//	    "PostToolUse": [{ "matcher": "apply_patch|Edit|Write|mcp__.*", "hooks": [{ "type": "command", "command": "/path/to/my-hooks codex-post-tool-use" }] }],
 //	    "UserPromptSubmit": [{ "hooks": [{ "type": "command", "command": "/path/to/my-hooks codex-user-prompt-submit" }] }]
 //	  }
 //	}

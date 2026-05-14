@@ -89,7 +89,9 @@ Handles pre-execution events for shell commands and MCP tools.
 
 **Registers:** `claude-pre-tool-use`, `cursor-before-shell`, `cursor-before-mcp`, `droid-pre-tool-use`, `cascade-pre-run-command`, `cascade-pre-mcp-tool-use`, `codex-pre-tool-use`
 
-For Codex, `apply_patch` is classified as `ExecutionTool` (not `ExecutionShell` or `ExecutionMCP`); use `ctx.ToolName == "apply_patch"` to detect it.
+For Codex, `apply_patch` is classified as `ExecutionTool` (not `ExecutionShell` or `ExecutionMCP`); use `ctx.ToolName == "apply_patch"` to detect it. The patch text is exposed via `ctx.Command` so policies can inspect it without re-parsing `ToolInput`.
+
+Codex does not currently enforce `permissionDecision: "ask"`. To avoid a silent fail-open, the unified bridge rewrites `AskExecution(...)` decisions to a `Deny` on Codex; on every other platform `Ask` still surfaces an approval prompt as before.
 
 ### ExecutionType
 
@@ -185,7 +187,9 @@ Handles post-file-edit events.
 
 **Registers:** `claude-after-file-edit`, `cursor-after-file-edit`, `droid-after-file-edit`, `cascade-post-write-code`, `codex-post-tool-use`
 
-For Codex, the underlying PostToolUse handler also matches `apply_patch` in addition to `Write` and `Edit`. Configure the hook with `matcher: "apply_patch|Edit|Write"` in `~/.codex/hooks.json`.
+For Codex, the underlying PostToolUse handler also matches `apply_patch` in addition to `Write` and `Edit`. Configure the hook with `matcher: "apply_patch|Edit|Write|mcp__.*"` in `~/.codex/hooks.json`.
+
+For Codex `apply_patch`, the unified bridge parses the unified-diff envelope in `tool_input.command` and invokes your handler **once per file** in the patch, with `FilePath` set to the file declared in the `*** Add/Update/Delete File:` header and `Edits` populated from each hunk. If any of those invocations returns `FileEditBlock`, the reasons are concatenated and emitted as a single `PostToolBlock`.
 
 ### FileEdit
 

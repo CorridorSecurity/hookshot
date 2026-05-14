@@ -142,13 +142,15 @@ type PreToolUseHookOutput struct {
 
 Codex honors `permissionDecision: "deny"` (or the older `decision: "block"` shape) on Bash and `apply_patch`. `"allow"`, `"ask"`, `updatedInput`, `additionalContext`, `continue: false`, `stopReason`, and `suppressOutput` are parsed but fail open today.
 
+> **Fail-closed `Ask` on the unified API.** Because Codex doesn't enforce `"ask"` yet, `hookshot.OnBeforeExecution` returning `AskExecution(...)` is translated to a `Deny` on Codex so policies that require user confirmation aren't silently bypassed. If you call the platform-level `codex.Ask` helper directly, the output JSON still encodes `"ask"` (so it round-trips with the upstream protocol) — that's only useful for forward-compat testing today.
+
 ### Helper Functions
 
 ```go
 func Deny(reason string) PreToolUseOutput     // Enforced: blocks Bash and apply_patch
 func Allow(reason string) PreToolUseOutput    // Parsed but currently falls through
 func AllowSilent() PreToolUseOutput           // Parsed but currently falls through
-func Ask(reason string) PreToolUseOutput      // Parsed but currently falls through
+func Ask(reason string) PreToolUseOutput      // Parsed but currently falls through (unified API rewrites to Deny)
 func PassThrough() PreToolUseOutput           // Empty output, normal flow
 ```
 
@@ -261,6 +263,15 @@ func PostToolOK() PostToolUseOutput
 func PostToolBlock(reason string) PostToolUseOutput
 func PostToolContext(context string) PostToolUseOutput
 ```
+
+### apply_patch parsing on the unified API
+
+`hookshot.OnAfterFileEdit` parses Codex `apply_patch` events by unpacking the unified-diff envelope in `tool_input.command` and invoking your handler **once per file** mentioned in the patch. Each invocation receives a fully populated `FileEditContext`:
+
+- `FilePath` is the path declared in the `*** Add File:`, `*** Update File:`, or `*** Delete File:` section.
+- `Edits` is `[{OldString: "", NewString: <added content>}]` for Add, one `FileEdit` per hunk for Update (with removed lines as `OldString` and added lines as `NewString`), and empty for Delete.
+
+If any of those per-file invocations returns `FileEditBlock`, the unified bridge concatenates the reasons and emits a single `PostToolBlock` so Codex replaces the tool result with the combined feedback. The platform-level `codex.PostToolUseInput` retains the raw `tool_input.command` if you'd rather parse the patch yourself.
 
 ### Example
 
@@ -398,7 +409,7 @@ codex_hooks = true
   "hooks": {
     "PreToolUse": [
       {
-        "matcher": "Bash|apply_patch",
+        "matcher": "Bash|apply_patch|mcp__.*",
         "hooks": [
           { "type": "command", "command": "/path/to/my-hooks codex-pre-tool-use" }
         ]
@@ -406,7 +417,7 @@ codex_hooks = true
     ],
     "PostToolUse": [
       {
-        "matcher": "apply_patch|Edit|Write",
+        "matcher": "apply_patch|Edit|Write|mcp__.*",
         "hooks": [
           { "type": "command", "command": "/path/to/my-hooks codex-post-tool-use" }
         ]
@@ -431,3 +442,5 @@ codex_hooks = true
 ```
 
 `hookshot install --codex --binary /path/to/my-hooks` will generate this layout for you, but it will not toggle the `codex_hooks` feature flag — set that yourself.
+
+> **Why `mcp__.*` is in the matcher.** Codex passes MCP tool names to PreToolUse / PostToolUse using the `mcp__server__tool` convention. Omitting the `mcp__.*` alternative would mean Codex never invokes the hook binary for MCP calls, which would silently bypass any `OnBeforeExecution` policy meant to enforce MCP allowlists.

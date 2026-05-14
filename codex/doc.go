@@ -24,13 +24,13 @@
 //	  "hooks": {
 //	    "PreToolUse": [
 //	      {
-//	        "matcher": "Bash|apply_patch",
+//	        "matcher": "Bash|apply_patch|mcp__.*",
 //	        "hooks": [{ "type": "command", "command": "/path/to/hook codex-pre-tool-use" }]
 //	      }
 //	    ],
 //	    "PostToolUse": [
 //	      {
-//	        "matcher": "apply_patch|Edit|Write",
+//	        "matcher": "apply_patch|Edit|Write|mcp__.*",
 //	        "hooks": [{ "type": "command", "command": "/path/to/hook codex-post-tool-use" }]
 //	      }
 //	    ],

@@ -494,14 +494,18 @@ func installCodex(binaryPath string) error {
 			}},
 		}},
 		"PreToolUse": []map[string]any{{
-			"matcher": "Bash|apply_patch",
+			// Include mcp__.* so MCP tool calls also reach the hook
+			// binary. Without this, the codex-pre-tool-use handler is
+			// never invoked for MCP tools and any OnBeforeExecution
+			// policy that enforces MCP allowlists is silently bypassed.
+			"matcher": "Bash|apply_patch|mcp__.*",
 			"hooks": []map[string]any{{
 				"type":    "command",
 				"command": binaryPath + " codex-pre-tool-use",
 			}},
 		}},
 		"PostToolUse": []map[string]any{{
-			"matcher": "apply_patch|Edit|Write",
+			"matcher": "apply_patch|Edit|Write|mcp__.*",
 			"hooks": []map[string]any{{
 				"type":    "command",
 				"command": binaryPath + " codex-post-tool-use",

@@ -452,10 +452,12 @@ func OnBeforeExecution(handler ExecutionHandler) {
 		})
 	})
 
-	// Codex PreToolUse (same JSON protocol as Claude Code)
+	// Codex PreToolUse (same JSON protocol as Claude Code).
 	// Codex tool names include "Bash", "apply_patch", and MCP names like
 	// "mcp__server__tool". apply_patch is classified as ExecutionTool because
-	// it represents a file edit rather than a shell command or MCP call.
+	// it represents a file edit rather than a shell command or MCP call. For
+	// apply_patch the underlying tool_input.command is parsed and exposed
+	// via ExecutionContext.Command so policies can inspect the patch text.
 	Register("codex-pre-tool-use", func() {
 		Run(func(input claude.PreToolUseInput) claude.PreToolUseOutput {
 			var execType ExecutionType
@@ -468,12 +470,12 @@ func OnBeforeExecution(handler ExecutionHandler) {
 			}
 
 			var command string
-			if execType == ExecutionShell {
-				var bashInput struct {
+			if execType == ExecutionShell || input.ToolName == "apply_patch" {
+				var cmdInput struct {
 					Command string `json:"command"`
 				}
-				json.Unmarshal(input.ToolInput, &bashInput)
-				command = bashInput.Command
+				json.Unmarshal(input.ToolInput, &cmdInput)
+				command = cmdInput.Command
 			}
 
 			ctx := ExecutionContext{
@@ -493,8 +495,13 @@ func OnBeforeExecution(handler ExecutionHandler) {
 				}
 				return claude.AllowSilent()
 			}
+			// Codex currently parses but does not enforce permissionDecision
+			// "ask" for PreToolUse, so an Ask decision would silently fail
+			// open. Until Codex enforces it, fail closed by denying — this
+			// matches the security posture of the other platforms where
+			// Ask actually surfaces an approval prompt.
 			if decision.Ask {
-				return claude.Ask(decision.Reason)
+				return claude.Deny(decision.Reason)
 			}
 			return claude.Deny(decision.Reason)
 		})
@@ -701,44 +708,109 @@ func OnAfterFileEdit(handler FileEditHandler) {
 	})
 
 	// Codex PostToolUse (same JSON protocol as Claude Code).
-	// Codex uses apply_patch in addition to Write/Edit. Configure the hook
-	// with a matcher like "apply_patch|Edit|Write" in hooks.json.
+	// Codex uses apply_patch in addition to Write/Edit; apply_patch carries
+	// a unified-diff envelope under tool_input.command that may touch
+	// multiple files in a single call. For each file in the patch we invoke
+	// the user's handler exactly once with a populated FileEditContext, and
+	// we combine the decisions across files: a Block from any file wins,
+	// otherwise context strings are concatenated. Configure the hook with a
+	// matcher like "apply_patch|Edit|Write" in hooks.json.
 	Register("codex-post-tool-use", func() {
 		Run(func(input claude.PostToolUseInput) claude.PostToolUseOutput {
 			if input.ToolName != "Write" && input.ToolName != "Edit" && input.ToolName != "apply_patch" {
 				return claude.PostToolOK()
 			}
 
-			var toolInput struct {
-				FilePath  string `json:"file_path"`
-				Content   string `json:"content"`
-				OldString string `json:"old_string"`
-				NewString string `json:"new_string"`
-			}
-			json.Unmarshal(input.ToolInput, &toolInput)
+			// Write/Edit use the Claude-style schema.
+			if input.ToolName == "Write" || input.ToolName == "Edit" {
+				var toolInput struct {
+					FilePath  string `json:"file_path"`
+					Content   string `json:"content"`
+					OldString string `json:"old_string"`
+					NewString string `json:"new_string"`
+				}
+				json.Unmarshal(input.ToolInput, &toolInput)
 
-			var edits []FileEdit
-			if input.ToolName == "Edit" {
-				edits = []FileEdit{{OldString: toolInput.OldString, NewString: toolInput.NewString}}
-			} else {
-				edits = []FileEdit{{OldString: "", NewString: toolInput.Content}}
+				var edits []FileEdit
+				if input.ToolName == "Edit" {
+					edits = []FileEdit{{OldString: toolInput.OldString, NewString: toolInput.NewString}}
+				} else {
+					edits = []FileEdit{{OldString: "", NewString: toolInput.Content}}
+				}
+
+				ctx := FileEditContext{
+					Platform:      PlatformCodex,
+					SessionID:     input.SessionID,
+					FilePath:      toolInput.FilePath,
+					Edits:         edits,
+					Cwd:           input.Cwd,
+					RawClaudeCode: &input,
+				}
+
+				decision := handler(ctx)
+				if decision.Block {
+					return claude.PostToolBlock(decision.Reason)
+				}
+				if decision.Context != "" {
+					return claude.PostToolContext(decision.Context)
+				}
+				return claude.PostToolOK()
 			}
 
-			ctx := FileEditContext{
-				Platform:      PlatformCodex,
-				SessionID:     input.SessionID,
-				FilePath:      toolInput.FilePath,
-				Edits:         edits,
-				Cwd:           input.Cwd,
-				RawClaudeCode: &input,
+			// apply_patch: tool_input is {"command": "*** Begin Patch ..."}.
+			var applyInput struct {
+				Command string `json:"command"`
+			}
+			json.Unmarshal(input.ToolInput, &applyInput)
+
+			files := parseCodexApplyPatch(applyInput.Command)
+			if len(files) == 0 {
+				// We could not parse anything actionable out of the patch.
+				// Fall back to invoking the handler once with whatever raw
+				// information we have so policies still see a Codex
+				// PostToolUse event rather than nothing.
+				ctx := FileEditContext{
+					Platform:      PlatformCodex,
+					SessionID:     input.SessionID,
+					Cwd:           input.Cwd,
+					Edits:         []FileEdit{{OldString: "", NewString: applyInput.Command}},
+					RawClaudeCode: &input,
+				}
+				decision := handler(ctx)
+				if decision.Block {
+					return claude.PostToolBlock(decision.Reason)
+				}
+				if decision.Context != "" {
+					return claude.PostToolContext(decision.Context)
+				}
+				return claude.PostToolOK()
 			}
 
-			decision := handler(ctx)
-			if decision.Block {
-				return claude.PostToolBlock(decision.Reason)
+			var (
+				blockReasons []string
+				contexts     []string
+			)
+			for _, f := range files {
+				ctx := FileEditContext{
+					Platform:      PlatformCodex,
+					SessionID:     input.SessionID,
+					FilePath:      f.FilePath,
+					Edits:         f.Edits,
+					Cwd:           input.Cwd,
+					RawClaudeCode: &input,
+				}
+				decision := handler(ctx)
+				if decision.Block {
+					blockReasons = append(blockReasons, decision.Reason)
+				} else if decision.Context != "" {
+					contexts = append(contexts, decision.Context)
+				}
 			}
-			if decision.Context != "" {
-				return claude.PostToolContext(decision.Context)
+			if len(blockReasons) > 0 {
+				return claude.PostToolBlock(strings.Join(blockReasons, "\n"))
+			}
+			if len(contexts) > 0 {
+				return claude.PostToolContext(strings.Join(contexts, "\n"))
 			}
 			return claude.PostToolOK()
 		})
