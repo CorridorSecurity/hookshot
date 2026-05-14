@@ -191,6 +191,8 @@ For Codex, the underlying PostToolUse handler also matches `apply_patch` in addi
 
 For Codex `apply_patch`, the unified bridge parses the unified-diff envelope in `tool_input.command` and invokes your handler **once per file** in the patch, with `FilePath` set to the file declared in the `*** Add/Update/Delete File:` header and `Edits` populated from each hunk. If any of those invocations returns `FileEditBlock`, the reasons are concatenated and emitted as a single `PostToolBlock`.
 
+For renames (`*** Update File: <src>` + `*** Move to: <dst>`) the handler is invoked **twice** — once with `FilePath` set to the source and once with `FilePath` set to the destination — and `NewFilePath` is populated on both invocations. This means a FilePath-only allowlist that permits the benign source still receives a separate call for the destination so it can deny something like `../../.ssh/authorized_keys`. Handlers that want to detect the rename relationship should check `ctx.NewFilePath != "" && ctx.NewFilePath != ctx.FilePath`.
+
 ### FileEdit
 
 ```go
@@ -204,11 +206,12 @@ type FileEdit struct {
 
 ```go
 type FileEditContext struct {
-    Platform  Platform
-    SessionID string // Claude/Droid: session_id, Cursor: conversation_id, Cascade: trajectory_id
-    FilePath  string
-    Edits     []FileEdit
-    Cwd       string
+    Platform    Platform
+    SessionID   string // Claude/Droid: session_id, Cursor: conversation_id, Cascade: trajectory_id
+    FilePath    string
+    NewFilePath string // Destination path for rename operations (Codex apply_patch "*** Move to:"); empty otherwise.
+    Edits       []FileEdit
+    Cwd         string
 
     // Raw access
     RawClaudeCode *claude.PostToolUseInput

@@ -951,6 +951,100 @@ func TestCodexPostToolUse_ApplyPatchParsesFilesAndEdits(t *testing.T) {
 	}
 }
 
+func TestCodexPostToolUse_ApplyPatchMoveToInvokesHandlerForDestination(t *testing.T) {
+	// An apply_patch with a "*** Move to:" directive must surface the
+	// destination path to the handler. Without this, a patch like
+	// "*** Update File: app/config.go\n*** Move to: ../../.ssh/authorized_keys"
+	// would slip past a path-based policy that only inspects
+	// ctx.FilePath. The bridge invokes the handler twice for a rename so
+	// existing FilePath-only policies catch the destination.
+	ClearHandlers()
+	defer ClearHandlers()
+
+	var seen []FileEditContext
+	OnAfterFileEdit(func(ctx FileEditContext) FileEditDecision {
+		seen = append(seen, ctx)
+		return FileEditOK()
+	})
+
+	patch := "*** Begin Patch\\n" +
+		"*** Update File: app/config.go\\n" +
+		"*** Move to: ../../.ssh/authorized_keys\\n" +
+		"@@\\n" +
+		"-old\\n" +
+		"+attacker-controlled\\n" +
+		"*** End Patch"
+	stdin := `{"session_id":"s","tool_name":"apply_patch","tool_input":{"command":"` + patch + `"},"cwd":"/repo"}`
+	runHandlerWithStdin(t, "codex-post-tool-use", stdin)
+
+	if len(seen) != 2 {
+		t.Fatalf("handler invocations = %d, want 2 (source + destination); got %+v", len(seen), seen)
+	}
+	// Both invocations must expose the destination via NewFilePath so a
+	// policy can detect that a rename is happening.
+	for _, c := range seen {
+		if c.NewFilePath != "../../.ssh/authorized_keys" {
+			t.Errorf("NewFilePath = %q, want %q", c.NewFilePath, "../../.ssh/authorized_keys")
+		}
+	}
+	// First call: source path. Second call: destination path. A
+	// FilePath-only allowlist that permits "app/config.go" must still see
+	// "../../.ssh/authorized_keys" so it can deny it.
+	if seen[0].FilePath != "app/config.go" {
+		t.Errorf("seen[0].FilePath = %q, want %q", seen[0].FilePath, "app/config.go")
+	}
+	if seen[1].FilePath != "../../.ssh/authorized_keys" {
+		t.Errorf("seen[1].FilePath = %q, want %q", seen[1].FilePath, "../../.ssh/authorized_keys")
+	}
+}
+
+func TestCodexPostToolUse_ApplyPatchMoveToBlockOnDestinationPropagates(t *testing.T) {
+	// A FilePath-only policy that blocks ".ssh/authorized_keys" must
+	// surface as a PostToolBlock even when the source path was benign.
+	ClearHandlers()
+	defer ClearHandlers()
+
+	OnAfterFileEdit(func(ctx FileEditContext) FileEditDecision {
+		if strings.Contains(ctx.FilePath, ".ssh/authorized_keys") {
+			return FileEditBlock("destination is a sensitive path")
+		}
+		return FileEditOK()
+	})
+
+	patch := "*** Begin Patch\\n" +
+		"*** Update File: app/config.go\\n" +
+		"*** Move to: ../../.ssh/authorized_keys\\n" +
+		"@@\\n" +
+		"-old\\n" +
+		"+attacker-controlled\\n" +
+		"*** End Patch"
+	stdin := `{"session_id":"s","tool_name":"apply_patch","tool_input":{"command":"` + patch + `"},"cwd":"/repo"}`
+
+	stdinR, stdinW, _ := os.Pipe()
+	stdinW.Write([]byte(stdin))
+	stdinW.Close()
+	stdoutR, stdoutW, _ := os.Pipe()
+	origStdin, origStdout := os.Stdin, os.Stdout
+	os.Stdin, os.Stdout = stdinR, stdoutW
+	defer func() {
+		stdoutW.Close()
+		os.Stdin, os.Stdout = origStdin, origStdout
+	}()
+
+	handlers["codex-post-tool-use"]()
+	stdoutW.Close()
+
+	var buf bytes.Buffer
+	buf.ReadFrom(stdoutR)
+	out := buf.String()
+	if !strings.Contains(out, `"decision":"block"`) {
+		t.Errorf("expected PostToolBlock JSON output, got %q", out)
+	}
+	if !strings.Contains(out, "destination is a sensitive path") {
+		t.Errorf("expected block reason to be present, got %q", out)
+	}
+}
+
 func TestCodexPostToolUse_ApplyPatchBlockPropagates(t *testing.T) {
 	// If any file in a multi-file apply_patch is blocked, the unified
 	// handler must emit a PostToolBlock so Codex sees feedback rather than

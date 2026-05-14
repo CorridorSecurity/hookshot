@@ -269,7 +269,10 @@ func PostToolContext(context string) PostToolUseOutput
 `hookshot.OnAfterFileEdit` parses Codex `apply_patch` events by unpacking the unified-diff envelope in `tool_input.command` and invoking your handler **once per file** mentioned in the patch. Each invocation receives a fully populated `FileEditContext`:
 
 - `FilePath` is the path declared in the `*** Add File:`, `*** Update File:`, or `*** Delete File:` section.
+- `NewFilePath` is the destination path for rename operations (`*** Move to:`); empty otherwise.
 - `Edits` is `[{OldString: "", NewString: <added content>}]` for Add, one `FileEdit` per hunk for Update (with removed lines as `OldString` and added lines as `NewString`), and empty for Delete.
+
+For renames (`*** Update File: <src>` followed by `*** Move to: <dst>`), the handler is invoked **twice** — once with `FilePath` set to the source and once with `FilePath` set to the destination — and `NewFilePath` is populated on both invocations. This ensures that a FilePath-only allowlist which permits the benign source path still receives a separate call for the destination path and can deny moves to sensitive locations like `../../.ssh/authorized_keys`. Policies that want to react specifically to renames should check `ctx.NewFilePath != "" && ctx.NewFilePath != ctx.FilePath`.
 
 If any of those per-file invocations returns `FileEditBlock`, the unified bridge concatenates the reasons and emits a single `PostToolBlock` so Codex replaces the tool result with the combined feedback. The platform-level `codex.PostToolUseInput` retains the raw `tool_input.command` if you'd rather parse the patch yourself.
 

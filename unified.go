@@ -523,8 +523,19 @@ type FileEditContext struct {
 	Platform  Platform
 	SessionID string // Claude Code: session_id, Cursor: conversation_id, Cascade: trajectory_id
 	FilePath  string
-	Edits     []FileEdit
-	Cwd       string
+	// NewFilePath is the destination path when the edit also renames the
+	// file (Codex apply_patch "*** Move to:" today; future platforms may
+	// surface their own rename semantics). It is empty for in-place edits.
+	//
+	// For Codex moves, the unified bridge invokes OnAfterFileEdit twice —
+	// once with FilePath set to the source and once with FilePath set to
+	// the destination — and populates NewFilePath on both invocations so
+	// path-based policies can never be bypassed by inspecting only
+	// FilePath. Handlers that want to detect a rename should check
+	// `ctx.NewFilePath != "" && ctx.NewFilePath != ctx.FilePath`.
+	NewFilePath string
+	Edits       []FileEdit
+	Cwd         string
 
 	// Raw input for advanced use cases
 	RawClaudeCode *claude.PostToolUseInput
@@ -790,11 +801,12 @@ func OnAfterFileEdit(handler FileEditHandler) {
 				blockReasons []string
 				contexts     []string
 			)
-			for _, f := range files {
+			invoke := func(filePath string, f codexApplyPatchFile) {
 				ctx := FileEditContext{
 					Platform:      PlatformCodex,
 					SessionID:     input.SessionID,
-					FilePath:      f.FilePath,
+					FilePath:      filePath,
+					NewFilePath:   f.NewFilePath,
 					Edits:         f.Edits,
 					Cwd:           input.Cwd,
 					RawClaudeCode: &input,
@@ -804,6 +816,19 @@ func OnAfterFileEdit(handler FileEditHandler) {
 					blockReasons = append(blockReasons, decision.Reason)
 				} else if decision.Context != "" {
 					contexts = append(contexts, decision.Context)
+				}
+			}
+			for _, f := range files {
+				// Always invoke for the declared source path.
+				invoke(f.FilePath, f)
+				// For renames, invoke again with the destination so policies
+				// that only inspect ctx.FilePath cannot be bypassed by a
+				// "*** Move to:" pointing at a sensitive path (e.g.
+				// "../../.ssh/authorized_keys"). NewFilePath is populated on
+				// both invocations so policies that want to detect the
+				// rename relationship can.
+				if f.NewFilePath != "" && f.NewFilePath != f.FilePath {
+					invoke(f.NewFilePath, f)
 				}
 			}
 			if len(blockReasons) > 0 {
