@@ -262,6 +262,25 @@ func TestPlatformConstants(t *testing.T) {
 	if PlatformCursor != "cursor" {
 		t.Errorf("PlatformCursor = %q, want %q", PlatformCursor, "cursor")
 	}
+	if PlatformDroid != "droid" {
+		t.Errorf("PlatformDroid = %q, want %q", PlatformDroid, "droid")
+	}
+	if PlatformCascade != "cascade" {
+		t.Errorf("PlatformCascade = %q, want %q", PlatformCascade, "cascade")
+	}
+	if PlatformCodex != "codex" {
+		t.Errorf("PlatformCodex = %q, want %q", PlatformCodex, "codex")
+	}
+}
+
+func TestStopContext_ShouldSkip_Codex(t *testing.T) {
+	// Codex uses StopHookActive like Claude Code and Droid.
+	if !(StopContext{Platform: PlatformCodex, StopHookActive: true}).ShouldSkip() {
+		t.Error("Codex StopHookActive=true should skip")
+	}
+	if (StopContext{Platform: PlatformCodex, StopHookActive: false}).ShouldSkip() {
+		t.Error("Codex StopHookActive=false should not skip")
+	}
 }
 
 // =============================================================================
@@ -307,6 +326,7 @@ func TestOnBeforeExecution_RegistersAllHandlers(t *testing.T) {
 		"droid-pre-tool-use",
 		"cascade-pre-run-command",
 		"cascade-pre-mcp-tool-use",
+		"codex-pre-tool-use",
 	}
 
 	for _, name := range expectedHandlers {
@@ -329,6 +349,7 @@ func TestOnPromptSubmit_RegistersAllHandlers(t *testing.T) {
 		"cursor-before-submit-prompt",
 		"droid-user-prompt-submit",
 		"cascade-pre-user-prompt",
+		"codex-user-prompt-submit",
 	}
 
 	for _, name := range expectedHandlers {
@@ -351,6 +372,7 @@ func TestOnStop_RegistersAllHandlers(t *testing.T) {
 		"cursor-stop",
 		"droid-stop",
 		"cascade-post-cascade-response",
+		"codex-stop",
 	}
 
 	for _, name := range expectedHandlers {
@@ -373,6 +395,7 @@ func TestOnAfterFileEdit_RegistersAllHandlers(t *testing.T) {
 		"cursor-after-file-edit",
 		"droid-after-file-edit",
 		"cascade-post-write-code",
+		"codex-post-tool-use",
 	}
 
 	for _, name := range expectedHandlers {

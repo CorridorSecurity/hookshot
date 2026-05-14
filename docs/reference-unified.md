@@ -1,6 +1,6 @@
 # Unified API Reference
 
-The unified API provides cross-platform handlers that work on Claude Code, Cursor, Windsurf Cascade, and Factory Droid. Write once, run on all platforms.
+The unified API provides cross-platform handlers that work on Claude Code, Cursor, Windsurf Cascade, Factory Droid, and OpenAI Codex. Write once, run on all platforms.
 
 ## Platform Constants
 
@@ -12,6 +12,7 @@ const (
     PlatformCursor  Platform = "cursor"
     PlatformDroid   Platform = "droid"
     PlatformCascade Platform = "cascade"
+    PlatformCodex   Platform = "codex"
 )
 ```
 
@@ -19,17 +20,17 @@ const (
 
 Handles stop events when the agent is about to finish.
 
-**Registers:** `claude-stop`, `cursor-stop`, `droid-stop`, `cascade-post-cascade-response`
+**Registers:** `claude-stop`, `cursor-stop`, `droid-stop`, `cascade-post-cascade-response`, `codex-stop`
 
 ### StopContext
 
 ```go
 type StopContext struct {
     Platform  Platform
-    SessionID string // Claude/Droid: session_id, Cursor: conversation_id, Cascade: trajectory_id
-    Cwd       string // Working directory (Claude/Droid only, empty for Cursor/Cascade)
+    SessionID string // Claude/Droid/Codex: session_id, Cursor: conversation_id, Cascade: trajectory_id
+    Cwd       string // Working directory (Claude/Droid/Codex only, empty for Cursor/Cascade)
 
-    // Claude/Droid-specific
+    // Claude/Droid/Codex-specific
     StopHookActive bool // True if already continuing from a previous stop hook
 
     // Cursor-specific
@@ -42,7 +43,7 @@ type StopContext struct {
 
 ```go
 // ShouldSkip returns true if the stop hook should be skipped to prevent loops.
-// Claude/Droid: checks StopHookActive
+// Claude/Droid/Codex: checks StopHookActive
 // Cursor: checks LoopCount >= 3
 // Cascade: always returns false (no loop prevention mechanism)
 func (c StopContext) ShouldSkip() bool
@@ -86,7 +87,9 @@ hookshot.OnStop(func(ctx hookshot.StopContext) hookshot.StopDecision {
 
 Handles pre-execution events for shell commands and MCP tools.
 
-**Registers:** `claude-pre-tool-use`, `cursor-before-shell`, `cursor-before-mcp`, `droid-pre-tool-use`, `cascade-pre-run-command`, `cascade-pre-mcp-tool-use`
+**Registers:** `claude-pre-tool-use`, `cursor-before-shell`, `cursor-before-mcp`, `droid-pre-tool-use`, `cascade-pre-run-command`, `cascade-pre-mcp-tool-use`, `codex-pre-tool-use`
+
+For Codex, `apply_patch` is classified as `ExecutionTool` (not `ExecutionShell` or `ExecutionMCP`); use `ctx.ToolName == "apply_patch"` to detect it.
 
 ### ExecutionType
 
@@ -107,9 +110,9 @@ type ExecutionContext struct {
     Platform Platform
     Type     ExecutionType
 
-    // For shell execution (Cursor beforeShellExecution, Claude Code Bash tool)
+    // For shell execution (Cursor beforeShellExecution, Claude Code/Codex Bash tool)
     // Also used for local MCP servers on Cursor (command-based MCP servers)
-    // NOTE: Only populated for Cursor and Cascade, not Claude Code or Droid
+    // NOTE: For Claude Code, Droid, and Codex, Command is parsed from tool_input.command for Bash.
     Command string
     Cwd     string // Working directory
 
@@ -119,6 +122,8 @@ type ExecutionContext struct {
     ServerURL string          // MCP server URL (Cursor/Cascade only, for URL-based servers)
 
     // Raw access
+    // For Codex, the raw input is shared with Claude Code (RawClaudeCode) because
+    // Codex uses the same JSON wire format.
     RawClaudeCode *claude.PreToolUseInput
     RawCursor     any // *cursor.BeforeShellExecutionInput or *cursor.BeforeMCPExecutionInput
     RawDroid      *droid.PreToolUseInput
@@ -178,7 +183,9 @@ hookshot.OnBeforeExecution(func(ctx hookshot.ExecutionContext) hookshot.Executio
 
 Handles post-file-edit events.
 
-**Registers:** `claude-after-file-edit`, `cursor-after-file-edit`, `droid-after-file-edit`, `cascade-post-write-code`
+**Registers:** `claude-after-file-edit`, `cursor-after-file-edit`, `droid-after-file-edit`, `cascade-post-write-code`, `codex-post-tool-use`
+
+For Codex, the underlying PostToolUse handler also matches `apply_patch` in addition to `Write` and `Edit`. Configure the hook with `matcher: "apply_patch|Edit|Write"` in `~/.codex/hooks.json`.
 
 ### FileEdit
 
@@ -251,7 +258,7 @@ hookshot.OnAfterFileEdit(func(ctx hookshot.FileEditContext) hookshot.FileEditDec
 
 Handles prompt submission events.
 
-**Registers:** `claude-user-prompt-submit`, `cursor-before-submit-prompt`, `droid-user-prompt-submit`, `cascade-pre-user-prompt`
+**Registers:** `claude-user-prompt-submit`, `cursor-before-submit-prompt`, `droid-user-prompt-submit`, `cascade-pre-user-prompt`, `codex-user-prompt-submit`
 
 ### PromptContext
 

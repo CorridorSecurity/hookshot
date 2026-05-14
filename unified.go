@@ -20,6 +20,7 @@ const (
 	PlatformCursor  Platform = "cursor"
 	PlatformDroid   Platform = "droid"
 	PlatformCascade Platform = "cascade"
+	PlatformCodex   Platform = "codex"
 )
 
 // =============================================================================
@@ -41,10 +42,11 @@ type StopContext struct {
 }
 
 // ShouldSkip returns true if the stop hook should be skipped to prevent loops.
-// For Claude Code and Droid, this checks StopHookActive. For Cursor, this checks LoopCount >= 3.
-// For Cascade, there is no loop prevention mechanism (returns false).
+// For Claude Code, Droid, and Codex, this checks StopHookActive. For Cursor,
+// this checks LoopCount >= 3. For Cascade, there is no loop prevention
+// mechanism (returns false).
 func (c StopContext) ShouldSkip() bool {
-	if c.Platform == PlatformClaude || c.Platform == PlatformDroid {
+	if c.Platform == PlatformClaude || c.Platform == PlatformDroid || c.Platform == PlatformCodex {
 		return c.StopHookActive
 	}
 	if c.Platform == PlatformCursor {
@@ -81,7 +83,7 @@ type StopHandler func(StopContext) StopDecision
 
 // OnStop registers a unified handler for stop events on all platforms.
 // It automatically registers handlers for "claude-stop", "cursor-stop",
-// "droid-stop", and "cascade-post-cascade-response".
+// "droid-stop", "cascade-post-cascade-response", and "codex-stop".
 func OnStop(handler StopHandler) {
 	Register("claude-stop", func() {
 		Run(func(input claude.StopInput) claude.StopOutput {
@@ -143,6 +145,23 @@ func OnStop(handler StopHandler) {
 			// for side effects (logging, telemetry, etc.)
 			handler(ctx)
 			return cascade.PostCascadeResponseOK()
+		})
+	})
+
+	// Codex uses the same JSON protocol as Claude Code
+	Register("codex-stop", func() {
+		Run(func(input claude.StopInput) claude.StopOutput {
+			ctx := StopContext{
+				Platform:       PlatformCodex,
+				SessionID:      input.SessionID,
+				Cwd:            input.Cwd,
+				StopHookActive: input.StopHookActive,
+			}
+			decision := handler(ctx)
+			if decision.Continue {
+				return claude.Continue()
+			}
+			return claude.Block(decision.Message)
 		})
 	})
 }
@@ -233,6 +252,7 @@ type ExecutionHandler func(ExecutionContext) ExecutionDecision
 //   - "droid-pre-tool-use" (filters to Bash and mcp__* tools)
 //   - "cascade-pre-run-command"
 //   - "cascade-pre-mcp-tool-use"
+//   - "codex-pre-tool-use" (filters to Bash, apply_patch, and mcp__* tools)
 func OnBeforeExecution(handler ExecutionHandler) {
 	// Claude Code PreToolUse (for Bash and MCP tools)
 	Register("claude-pre-tool-use", func() {
@@ -431,6 +451,54 @@ func OnBeforeExecution(handler ExecutionHandler) {
 			return cascade.PreMCPToolUseOutput{}, errors.New(decision.Reason)
 		})
 	})
+
+	// Codex PreToolUse (same JSON protocol as Claude Code)
+	// Codex tool names include "Bash", "apply_patch", and MCP names like
+	// "mcp__server__tool". apply_patch is classified as ExecutionTool because
+	// it represents a file edit rather than a shell command or MCP call.
+	Register("codex-pre-tool-use", func() {
+		Run(func(input claude.PreToolUseInput) claude.PreToolUseOutput {
+			var execType ExecutionType
+			if input.ToolName == "Bash" {
+				execType = ExecutionShell
+			} else if len(input.ToolName) > 5 && input.ToolName[:5] == "mcp__" {
+				execType = ExecutionMCP
+			} else {
+				execType = ExecutionTool
+			}
+
+			var command string
+			if execType == ExecutionShell {
+				var bashInput struct {
+					Command string `json:"command"`
+				}
+				json.Unmarshal(input.ToolInput, &bashInput)
+				command = bashInput.Command
+			}
+
+			ctx := ExecutionContext{
+				Platform:      PlatformCodex,
+				Type:          execType,
+				Command:       command,
+				Cwd:           input.Cwd,
+				ToolName:      input.ToolName,
+				ToolInput:     input.ToolInput,
+				RawClaudeCode: &input,
+			}
+
+			decision := handler(ctx)
+			if decision.Allow {
+				if decision.Reason != "" {
+					return claude.Allow(decision.Reason)
+				}
+				return claude.AllowSilent()
+			}
+			if decision.Ask {
+				return claude.Ask(decision.Reason)
+			}
+			return claude.Deny(decision.Reason)
+		})
+	})
 }
 
 // =============================================================================
@@ -494,6 +562,7 @@ type FileEditHandler func(FileEditContext) FileEditDecision
 //   - "cursor-after-file-edit"
 //   - "droid-after-file-edit" (PostToolUse for Write/Edit)
 //   - "cascade-post-write-code"
+//   - "codex-post-tool-use" (PostToolUse for Write/Edit/apply_patch)
 func OnAfterFileEdit(handler FileEditHandler) {
 	// Claude Code PostToolUse (for Write/Edit)
 	Register("claude-after-file-edit", func() {
@@ -630,6 +699,50 @@ func OnAfterFileEdit(handler FileEditHandler) {
 			return cascade.PostWriteCodeOK()
 		})
 	})
+
+	// Codex PostToolUse (same JSON protocol as Claude Code).
+	// Codex uses apply_patch in addition to Write/Edit. Configure the hook
+	// with a matcher like "apply_patch|Edit|Write" in hooks.json.
+	Register("codex-post-tool-use", func() {
+		Run(func(input claude.PostToolUseInput) claude.PostToolUseOutput {
+			if input.ToolName != "Write" && input.ToolName != "Edit" && input.ToolName != "apply_patch" {
+				return claude.PostToolOK()
+			}
+
+			var toolInput struct {
+				FilePath  string `json:"file_path"`
+				Content   string `json:"content"`
+				OldString string `json:"old_string"`
+				NewString string `json:"new_string"`
+			}
+			json.Unmarshal(input.ToolInput, &toolInput)
+
+			var edits []FileEdit
+			if input.ToolName == "Edit" {
+				edits = []FileEdit{{OldString: toolInput.OldString, NewString: toolInput.NewString}}
+			} else {
+				edits = []FileEdit{{OldString: "", NewString: toolInput.Content}}
+			}
+
+			ctx := FileEditContext{
+				Platform:      PlatformCodex,
+				SessionID:     input.SessionID,
+				FilePath:      toolInput.FilePath,
+				Edits:         edits,
+				Cwd:           input.Cwd,
+				RawClaudeCode: &input,
+			}
+
+			decision := handler(ctx)
+			if decision.Block {
+				return claude.PostToolBlock(decision.Reason)
+			}
+			if decision.Context != "" {
+				return claude.PostToolContext(decision.Context)
+			}
+			return claude.PostToolOK()
+		})
+	})
 }
 
 // =============================================================================
@@ -686,6 +799,7 @@ type PromptHandler func(PromptContext) PromptDecision
 //   - "cursor-before-submit-prompt"
 //   - "droid-user-prompt-submit"
 //   - "cascade-pre-user-prompt"
+//   - "codex-user-prompt-submit"
 func OnPromptSubmit(handler PromptHandler) {
 	// Claude Code UserPromptSubmit
 	Register("claude-user-prompt-submit", func() {
@@ -765,6 +879,28 @@ func OnPromptSubmit(handler PromptHandler) {
 				return cascade.PreUserPromptOutput{}, errors.New(decision.Reason)
 			}
 			return cascade.AllowPrompt(), nil
+		})
+	})
+
+	// Codex UserPromptSubmit (same JSON protocol as Claude Code)
+	Register("codex-user-prompt-submit", func() {
+		Run(func(input claude.UserPromptSubmitInput) claude.UserPromptSubmitOutput {
+			ctx := PromptContext{
+				Platform:      PlatformCodex,
+				SessionID:     input.SessionID,
+				Prompt:        input.Prompt,
+				Cwd:           input.Cwd,
+				RawClaudeCode: &input,
+			}
+
+			decision := handler(ctx)
+			if !decision.Allow {
+				return claude.BlockPrompt(decision.Reason)
+			}
+			if decision.Context != "" {
+				return claude.AddContext(decision.Context)
+			}
+			return claude.AllowPrompt()
 		})
 	})
 }

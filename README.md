@@ -1,6 +1,6 @@
 # hookshot
 
-A Go library for building hooks for AI coding agents like [Cursor](https://cursor.com/docs/agent/hooks), [Claude Code](https://docs.claude.com/en/docs/claude-code/hooks), [Windsurf Cascade](https://docs.codeium.com/windsurf/memories#hooks), and [Factory Droid](https://docs.factory.ai/reference/hooks-reference).
+A Go library for building hooks for AI coding agents like [Cursor](https://cursor.com/docs/agent/hooks), [Claude Code](https://docs.claude.com/en/docs/claude-code/hooks), [Windsurf Cascade](https://docs.codeium.com/windsurf/memories#hooks), [Factory Droid](https://docs.factory.ai/reference/hooks-reference), and [OpenAI Codex](https://developers.openai.com/codex/hooks).
 
 Hooks are a key component of [Agentic Coding Security Management (ACSM)](https://corridor.dev/blog/introducing-acsm/) — they let you observe, control, and secure AI agent behavior in your development environment.
 
@@ -97,16 +97,36 @@ hookshot install --binary /path/to/my-hooks
 }
 ```
 
+### OpenAI Codex (`~/.codex/hooks.json`)
+
+Codex hooks are gated behind a feature flag. Enable it in `~/.codex/config.toml`:
+
+```toml
+[features]
+codex_hooks = true
+```
+
+Then configure the hooks themselves:
+
+```json
+{
+  "hooks": {
+    "Stop": [{ "hooks": [{ "type": "command", "command": "/path/to/my-hooks codex-stop" }] }],
+    "PreToolUse": [{ "matcher": "Bash|apply_patch", "hooks": [{ "type": "command", "command": "/path/to/my-hooks codex-pre-tool-use" }] }]
+  }
+}
+```
+
 ## Unified Handlers
 
-Write once, run on all four platforms:
+Write once, run on all five platforms:
 
-| Handler | Claude Code | Cursor | Windsurf Cascade | Factory Droid |
-|---------|-------------|--------|------------------|---------------|
-| `OnStop` | Stop | stop | post-cascade-response | Stop |
-| `OnBeforeExecution` | PreToolUse | beforeShellExecution, beforeMCPExecution | pre-run-command, pre-mcp-tool-use | PreToolUse |
-| `OnAfterFileEdit` | PostToolUse | afterFileEdit | post-write-code | PostToolUse |
-| `OnPromptSubmit` | UserPromptSubmit | beforeSubmitPrompt | pre-user-prompt | UserPromptSubmit |
+| Handler | Claude Code | Cursor | Windsurf Cascade | Factory Droid | OpenAI Codex |
+|---------|-------------|--------|------------------|---------------|--------------|
+| `OnStop` | Stop | stop | post-cascade-response | Stop | Stop |
+| `OnBeforeExecution` | PreToolUse | beforeShellExecution, beforeMCPExecution | pre-run-command, pre-mcp-tool-use | PreToolUse | PreToolUse |
+| `OnAfterFileEdit` | PostToolUse | afterFileEdit | post-write-code | PostToolUse | PostToolUse |
+| `OnPromptSubmit` | UserPromptSubmit | beforeSubmitPrompt | pre-user-prompt | UserPromptSubmit | UserPromptSubmit |
 
 ## Platform-Specific Handlers
 
@@ -140,6 +160,13 @@ hookshot.Register("droid-pre-tool-use", func() {
         return droid.PassThrough()
     })
 })
+
+// OpenAI Codex: Pre-tool use (matches Bash, apply_patch, and MCP tools)
+hookshot.Register("codex-pre-tool-use", func() {
+    hookshot.Run(func(input codex.PreToolUseInput) codex.PreToolUseOutput {
+        return codex.PassThrough()
+    })
+})
 ```
 
 ## Documentation
@@ -149,6 +176,7 @@ hookshot.Register("droid-pre-tool-use", func() {
 - [Cursor Reference](docs/reference-cursor.md)
 - [Windsurf Cascade Reference](docs/reference-cascade.md)
 - [Factory Droid Reference](docs/reference-droid.md)
+- [OpenAI Codex Reference](docs/reference-codex.md)
 
 Full API documentation is available via godoc:
 
@@ -158,6 +186,7 @@ go doc github.com/CorridorSecurity/hookshot/claude
 go doc github.com/CorridorSecurity/hookshot/cursor
 go doc github.com/CorridorSecurity/hookshot/cascade
 go doc github.com/CorridorSecurity/hookshot/droid
+go doc github.com/CorridorSecurity/hookshot/codex
 ```
 
 Or view online at [pkg.go.dev/github.com/CorridorSecurity/hookshot](https://pkg.go.dev/github.com/CorridorSecurity/hookshot).
