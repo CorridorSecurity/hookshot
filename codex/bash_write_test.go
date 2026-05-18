@@ -308,6 +308,56 @@ func TestParseBashRedirectWrite_HeredocInsideIfBlock(t *testing.T) {
 	}
 }
 
+// Regression: a quoted target path (single or double quotes) must be
+// reported to OnAfterFileEdit with the surrounding quotes stripped —
+// i.e. the value Bash would actually write to, not the surface token.
+//
+// The original regex implementation captured the path via
+// `[^\s;&|]+`, which happily included surrounding quote characters,
+// so policies running `filepath.Rel(repoRoot, ctx.FilePath)` followed
+// by `strings.HasPrefix(rel, "..")` would see a string starting with
+// `'` or `"` and the containment check would silently pass while the
+// dangerous write proceeded. The AST-based parser unquotes
+// SglQuoted/DblQuoted Word parts via wordToLiteral; this test pins
+// that behavior so a future refactor can't regress it.
+func TestParseBashRedirectWrite_CatSingleQuotedPathEscapesContainment(t *testing.T) {
+	cmd := "cat <<'EOF' > '../../.ssh/authorized_keys'\nattacker-controlled\nEOF"
+
+	got, ok := ParseBashRedirectWrite(cmd)
+	if !ok {
+		t.Fatalf("ParseBashRedirectWrite(...) ok = false; want true")
+	}
+	if got[0].FilePath != "../../.ssh/authorized_keys" {
+		t.Errorf("FilePath = %q, want unquoted %q (quoted-path containment bypass)",
+			got[0].FilePath, "../../.ssh/authorized_keys")
+	}
+}
+
+func TestParseBashRedirectWrite_CatDoubleQuotedPathEscapesContainment(t *testing.T) {
+	cmd := "cat <<'EOF' > \"../../.ssh/authorized_keys\"\nattacker-controlled\nEOF"
+
+	got, ok := ParseBashRedirectWrite(cmd)
+	if !ok {
+		t.Fatalf("ParseBashRedirectWrite(...) ok = false; want true")
+	}
+	if got[0].FilePath != "../../.ssh/authorized_keys" {
+		t.Errorf("FilePath = %q, want unquoted %q",
+			got[0].FilePath, "../../.ssh/authorized_keys")
+	}
+}
+
+func TestParseBashRedirectWrite_TeeQuotedPathEscapesContainment(t *testing.T) {
+	cmd := "tee '../../.ssh/authorized_keys' <<'EOF'\nattacker-controlled\nEOF"
+
+	got, ok := ParseBashRedirectWrite(cmd)
+	if !ok {
+		t.Fatalf("ParseBashRedirectWrite(...) ok = false; want true")
+	}
+	if got[0].FilePath != "../../.ssh/authorized_keys" {
+		t.Errorf("FilePath = %q, want unquoted %q", got[0].FilePath, "../../.ssh/authorized_keys")
+	}
+}
+
 // Regression: an invalid Bash command (unclosed heredoc, dangling
 // quote, etc.) must fail closed rather than fall back to a partial
 // parse. The unified bridge surfaces the raw command through its
