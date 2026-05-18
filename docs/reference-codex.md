@@ -76,13 +76,19 @@ context without blocking the call (the upstream
 [Codex hooks doc](https://developers.openai.com/codex/hooks#pretooluse)
 shows this case as a first-class example).
 
-`permissionDecision: "ask"` is parsed but currently fails open.
-`hookshot.OnBeforeExecution` returning `AskExecution(...)` is rewritten to
-`Deny` on Codex so policies that require user confirmation aren't silently
-bypassed. The platform-level `codex.Ask` helper still emits `"ask"` in the
-JSON for forward-compat testing. If you want to react when Codex is
-actually about to prompt the user, register a separate handler for the
-**PermissionRequest** event below — that event's enforcement is supported.
+`permissionDecision: "ask"` is parsed by Codex but currently not enforced
+at the platform level — emitting it would silently allow the tool to run.
+To prevent "require confirmation" policies from turning into free passes,
+both the high-level and platform-level APIs fail closed:
+
+- `hookshot.OnBeforeExecution` returning `AskExecution(...)` is rewritten
+  to `Deny` on Codex.
+- `codex.Ask(reason)` is a fail-closed shim that returns `Deny(reason)` —
+  it does not emit `"ask"`.
+
+If you want to react when Codex is actually about to prompt the user,
+register a separate handler for the **PermissionRequest** event below —
+that event's enforcement is supported.
 
 **`updatedInput`, `continue: false`, `stopReason`, and `suppressOutput`
 fail closed** — Codex rejects the whole hook output with
@@ -94,10 +100,14 @@ field, so these must be omitted. Concretely, this means:
 - `codex.AllowSilent()` is **not safe**: it sets `suppressOutput: true`,
   which Codex rejects. Use `codex.PassThrough()` for an empty
   no-side-effects allow.
-- `codex.AllowWithInput(reason, input)` is **not safe**: it sets
-  `updatedInput`, which Codex rejects. There's no Codex-supported way to
-  mutate `tool_input` from a PreToolUse hook today — fall back to
-  injecting state through `additionalContext` instead.
+- `codex.AllowWithInput(reason, input)` is a **fail-closed shim**: there
+  is no Codex-supported way to mutate `tool_input` from a PreToolUse
+  hook (the CLI rejects `updatedInput`), and silently allowing the call
+  with the original, unsanitized input would defeat the purpose of
+  rewriting it. The helper therefore returns `Deny(reason + " (input
+  rewriting not supported on Codex; fail-closed)")`. If you need to
+  inject model-visible context on Codex, use `codex.AllowWithContext`
+  (or `additionalContext` directly) instead.
 - To attach model-visible context to an allow, return
   `codex.AllowWithContext(reason, context)` (or build the output by hand
   with `hookSpecificOutput.additionalContext`).

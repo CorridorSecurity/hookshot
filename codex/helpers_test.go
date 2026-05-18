@@ -1,6 +1,7 @@
 package codex
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -88,24 +89,54 @@ func TestAllowSilent_DoesNotEmitSuppressOutput(t *testing.T) {
 	}
 }
 
-func TestAllowWithInput_DropsUpdatedInput(t *testing.T) {
+func TestAllowWithInput_FailsClosed(t *testing.T) {
 	// Codex rejects updatedInput with
-	// "PreToolUse hook returned unsupported updatedInput".
-	// codex.AllowWithInput must NOT set UpdatedInput.
-	output := AllowWithInput("trusted", map[string]any{"file_path": "/tmp/x"})
-	if output.HookSpecificOutput != nil && output.HookSpecificOutput.UpdatedInput != nil {
+	// "PreToolUse hook returned unsupported updatedInput", so there is no
+	// safe way to apply the sanitized input. The helper must fail closed
+	// (Deny) rather than silently fall through to Allow with the original,
+	// unsanitized tool_input.
+	output := AllowWithInput("stripped --no-verify", map[string]any{"file_path": "/tmp/x"})
+	if output.HookSpecificOutput == nil {
+		t.Fatal("HookSpecificOutput should not be nil")
+	}
+	if output.HookSpecificOutput.PermissionDecision != "deny" {
+		t.Errorf("PermissionDecision = %q, want %q (fail-closed)", output.HookSpecificOutput.PermissionDecision, "deny")
+	}
+	if output.HookSpecificOutput.UpdatedInput != nil {
 		t.Error("codex.AllowWithInput must not set UpdatedInput (Codex rejects updatedInput)")
 	}
-	// Reason should still be passed through as permissionDecisionReason.
-	if output.HookSpecificOutput == nil || output.HookSpecificOutput.PermissionDecisionReason != "trusted" {
-		t.Errorf("Reason should be preserved as permissionDecisionReason, got %+v", output.HookSpecificOutput)
+	if !strings.Contains(output.HookSpecificOutput.PermissionDecisionReason, "stripped --no-verify") {
+		t.Errorf("PermissionDecisionReason should include caller reason, got %q", output.HookSpecificOutput.PermissionDecisionReason)
+	}
+	if !strings.Contains(output.HookSpecificOutput.PermissionDecisionReason, "input rewriting not supported on Codex") {
+		t.Errorf("PermissionDecisionReason should explain why input rewriting was dropped, got %q", output.HookSpecificOutput.PermissionDecisionReason)
 	}
 }
 
-func TestAllowWithInput_EmptyReasonProducesPassThrough(t *testing.T) {
+func TestAllowWithInput_EmptyReasonStillDenies(t *testing.T) {
 	output := AllowWithInput("", map[string]any{"k": "v"})
-	if output.HookSpecificOutput != nil {
-		t.Error("codex.AllowWithInput with empty reason should emit empty {} (pass-through)")
+	if output.HookSpecificOutput == nil {
+		t.Fatal("HookSpecificOutput should not be nil (fail-closed)")
+	}
+	if output.HookSpecificOutput.PermissionDecision != "deny" {
+		t.Errorf("PermissionDecision = %q, want %q (fail-closed)", output.HookSpecificOutput.PermissionDecision, "deny")
+	}
+}
+
+func TestAsk_FailsClosed(t *testing.T) {
+	// Codex parses but does not enforce permissionDecision: "ask" for
+	// PreToolUse, so emitting "ask" would silently execute the tool
+	// without surfacing an approval prompt. codex.Ask must fail closed
+	// (Deny) to match the unified bridge's behaviour on Codex.
+	output := Ask("Confirm before deleting the production database.")
+	if output.HookSpecificOutput == nil {
+		t.Fatal("HookSpecificOutput should not be nil")
+	}
+	if output.HookSpecificOutput.PermissionDecision != "deny" {
+		t.Errorf("PermissionDecision = %q, want %q (Codex does not enforce ask)", output.HookSpecificOutput.PermissionDecision, "deny")
+	}
+	if output.HookSpecificOutput.PermissionDecisionReason != "Confirm before deleting the production database." {
+		t.Errorf("PermissionDecisionReason = %q, want caller reason preserved", output.HookSpecificOutput.PermissionDecisionReason)
 	}
 }
 

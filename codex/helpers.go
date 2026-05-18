@@ -35,29 +35,41 @@ func AllowSilent() PreToolUseOutput {
 	return PreToolUseOutput{}
 }
 
-// AllowWithInput permits the tool. Codex does NOT support updatedInput —
-// the Codex CLI rejects the hook output with "PreToolUse hook returned
-// unsupported updatedInput" — so the updatedInput argument is dropped on
-// Codex. The reason argument is preserved via permissionDecision: "allow"
-// (which falls open on Codex today). The signature matches
-// claude.AllowWithInput for source compatibility, but callers that need
-// to inject context on Codex should use the model-side tool args instead
-// (Codex passes raw tool input through to MCP tools unchanged).
+// AllowWithInput is a fail-closed shim. Codex does NOT support updatedInput
+// — the CLI rejects the hook output with "PreToolUse hook returned
+// unsupported updatedInput" — so there is no Codex-supported way to mutate
+// tool_input from a PreToolUse hook today. If a caller is using
+// AllowWithInput it is almost certainly to sanitize a dangerous payload
+// (strip --no-verify, rewrite a Bash command, etc.); silently dropping
+// the sanitization and falling through to Allow would execute the
+// unsanitized payload. To prevent that, this helper denies the call and
+// surfaces the loss of input rewriting in the reason. The signature
+// matches claude.AllowWithInput for source compatibility — callers that
+// need to inject model-visible context on Codex should use
+// AllowWithContext / additionalContext instead.
 func AllowWithInput(reason string, _ map[string]any) PreToolUseOutput {
-	if reason == "" {
-		return PreToolUseOutput{}
+	msg := reason
+	if msg == "" {
+		msg = "blocked"
 	}
-	return claude.Allow(reason)
+	return claude.Deny(msg + " (input rewriting not supported on Codex; fail-closed)")
 }
 
 // Deny blocks the tool from executing. This is enforced by Codex for Bash
 // and apply_patch tools.
 var Deny = claude.Deny
 
-// Ask prompts the user to confirm the tool execution. Note that Codex
-// currently parses but does not enforce permissionDecision: "ask" for
-// PreToolUse, so this falls open today.
-var Ask = claude.Ask
+// Ask is a fail-closed shim. Codex parses but does not enforce
+// permissionDecision: "ask" for PreToolUse today, so emitting "ask" would
+// silently execute the tool without surfacing an approval prompt — turning
+// a "require confirmation" policy into a free pass. To match the security
+// posture of the hookshot unified bridge (which already rewrites
+// AskExecution to Deny on Codex; see unified.go), this helper returns a
+// Deny with the caller's reason. If you actually want Codex's approval
+// flow, register a PermissionRequest hook instead.
+func Ask(reason string) PreToolUseOutput {
+	return claude.Deny(reason)
+}
 
 // PassThrough returns an empty output, letting the normal permission flow proceed.
 var PassThrough = claude.PassThrough
