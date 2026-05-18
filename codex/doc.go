@@ -14,8 +14,7 @@
 //
 // Codex hooks are enabled by default in current releases (the `hooks`
 // feature flag is stable). If your organization disabled them, set
-// `[features].hooks = true` in ~/.codex/config.toml to re-enable. The
-// older `codex_hooks` key still works as a deprecated alias.
+// `[features].hooks = true` in ~/.codex/config.toml to re-enable.
 //
 // Configure hook commands in ~/.codex/hooks.json (or inline under [hooks] in
 // ~/.codex/config.toml):

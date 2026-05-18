@@ -4,7 +4,7 @@ Platform-specific types and helpers for OpenAI Codex hooks. Use these when you n
 
 Codex hooks use the same JSON wire format as Claude Code hooks, configured in `~/.codex/hooks.json` or inline `[hooks]` tables in `~/.codex/config.toml`. The `codex` Go package re-exports the relevant `claude` types so your code can stay platform-explicit while still benefiting from the shared types.
 
-Codex hooks are enabled by default (the `hooks` feature flag is stable in current Codex releases). If your organization disabled hooks, set `[features].hooks = true` in `~/.codex/config.toml` to re-enable. The older `codex_hooks` key still works as a deprecated alias.
+Codex hooks are enabled by default (the `hooks` feature flag is stable in current Codex releases). If your organization disabled hooks, set `[features].hooks = true` in `~/.codex/config.toml` to re-enable.
 
 See the upstream spec at https://developers.openai.com/codex/hooks.
 

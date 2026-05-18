@@ -102,7 +102,7 @@ hookshot install --binary /path/to/my-hooks
 Codex hooks are enabled by default (the `hooks` feature flag in Codex is
 stable and on). No `~/.codex/config.toml` change is required. If your
 organization disabled hooks, set `[features].hooks = true` to turn them
-back on — `codex_hooks` is a deprecated alias for the same flag.
+back on.
 
 ```json
 {
