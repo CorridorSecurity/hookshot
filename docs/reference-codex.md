@@ -4,12 +4,7 @@ Platform-specific types and helpers for OpenAI Codex hooks. Use these when you n
 
 Codex hooks use the same JSON wire format as Claude Code hooks, configured in `~/.codex/hooks.json` or inline `[hooks]` tables in `~/.codex/config.toml`. The `codex` Go package re-exports the relevant `claude` types so your code can stay platform-explicit while still benefiting from the shared types.
 
-Codex hooks are behind a feature flag — make sure `~/.codex/config.toml` contains:
-
-```toml
-[features]
-codex_hooks = true
-```
+Codex hooks are enabled by default (the `hooks` feature flag is stable in current Codex releases). If your organization disabled hooks, set `[features].hooks = true` in `~/.codex/config.toml` to re-enable. The older `codex_hooks` key still works as a deprecated alias.
 
 See the upstream spec at https://developers.openai.com/codex/hooks.
 
@@ -142,7 +137,7 @@ type PreToolUseHookOutput struct {
 
 Codex honors `permissionDecision: "deny"` (or the older `decision: "block"` shape) on Bash and `apply_patch`. `"allow"`, `"ask"`, `updatedInput`, `additionalContext`, `continue: false`, `stopReason`, and `suppressOutput` are parsed but fail open today.
 
-> **Fail-closed `Ask` on the unified API.** Because Codex doesn't enforce `"ask"` yet, `hookshot.OnBeforeExecution` returning `AskExecution(...)` is translated to a `Deny` on Codex so policies that require user confirmation aren't silently bypassed. If you call the platform-level `codex.Ask` helper directly, the output JSON still encodes `"ask"` (so it round-trips with the upstream protocol) — that's only useful for forward-compat testing today.
+> **Fail-closed `Ask` on the unified API.** Because Codex doesn't enforce `"ask"` yet, `hookshot.OnBeforeExecution` returning `AskExecution(...)` is translated to a `Deny` on Codex so policies that require user confirmation aren't silently bypassed. If you call the platform-level `codex.Ask` helper directly, the output JSON still encodes `"ask"` (so it round-trips with the upstream protocol) — that's only useful for forward-compat testing today. If you want to react when Codex is actually about to prompt the user, register a separate handler for the [PermissionRequest event](#permissionrequest) — that one's enforcement is supported.
 
 ### Helper Functions
 
@@ -274,7 +269,9 @@ func PostToolContext(context string) PostToolUseOutput
 
 For renames (`*** Update File: <src>` followed by `*** Move to: <dst>`), the handler is invoked **twice** — once with `FilePath` set to the source and once with `FilePath` set to the destination — and `NewFilePath` is populated on both invocations. This ensures that a FilePath-only allowlist which permits the benign source path still receives a separate call for the destination path and can deny moves to sensitive locations like `../../.ssh/authorized_keys`. Policies that want to react specifically to renames should check `ctx.NewFilePath != "" && ctx.NewFilePath != ctx.FilePath`.
 
-If any of those per-file invocations returns `FileEditBlock`, the unified bridge concatenates the reasons and emits a single `PostToolBlock` so Codex replaces the tool result with the combined feedback. The platform-level `codex.PostToolUseInput` retains the raw `tool_input.command` if you'd rather parse the patch yourself.
+If any of those per-file invocations returns `FileEditBlock`, the unified bridge concatenates the reasons and emits a single `PostToolBlock` so Codex replaces the tool result with the combined feedback.
+
+The same parser is also exported as `codex.ParseApplyPatch(rawCommand string) []codex.PatchFile` for callers that want to parse a patch envelope themselves (for example, from the raw `codex.PostToolUseInput.ToolInput`).
 
 ### Example
 
@@ -398,12 +395,7 @@ hookshot.Register("codex-stop", func() {
 
 ## Configuration Example
 
-`~/.codex/config.toml`:
-
-```toml
-[features]
-codex_hooks = true
-```
+Hooks are on by default — no `~/.codex/config.toml` edit required.
 
 `~/.codex/hooks.json`:
 
@@ -420,7 +412,7 @@ codex_hooks = true
     ],
     "PostToolUse": [
       {
-        "matcher": "apply_patch|Edit|Write|mcp__.*",
+        "matcher": "apply_patch|mcp__.*",
         "hooks": [
           { "type": "command", "command": "/path/to/my-hooks codex-post-tool-use" }
         ]
@@ -444,6 +436,8 @@ codex_hooks = true
 }
 ```
 
-`hookshot install --codex --binary /path/to/my-hooks` will generate this layout for you, but it will not toggle the `codex_hooks` feature flag — set that yourself.
+`hookshot install --codex --binary /path/to/my-hooks` will generate this layout for you.
 
 > **Why `mcp__.*` is in the matcher.** Codex passes MCP tool names to PreToolUse / PostToolUse using the `mcp__server__tool` convention. Omitting the `mcp__.*` alternative would mean Codex never invokes the hook binary for MCP calls, which would silently bypass any `OnBeforeExecution` policy meant to enforce MCP allowlists.
+
+> **Why `Edit|Write` is not in the matcher.** Codex emits `Edit` and `Write` as *matcher aliases* for `apply_patch`. The canonical `tool_name` Codex sends to the hook is always `apply_patch`, so a matcher of `apply_patch` alone covers every file-edit call. `Edit` and `Write` aliases never appear as standalone tool names.

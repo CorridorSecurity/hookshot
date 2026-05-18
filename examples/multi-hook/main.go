@@ -54,14 +54,14 @@
 //	  }
 //	}
 //
-// Configure in OpenAI Codex (~/.codex/hooks.json; requires
-// codex_hooks = true under [features] in ~/.codex/config.toml):
+// Configure in OpenAI Codex (~/.codex/hooks.json; hooks are enabled by
+// default in current Codex releases):
 //
 //	{
 //	  "hooks": {
 //	    "Stop": [{ "hooks": [{ "type": "command", "command": "/path/to/my-hooks codex-stop" }] }],
 //	    "PreToolUse": [{ "matcher": "Bash|apply_patch|mcp__.*", "hooks": [{ "type": "command", "command": "/path/to/my-hooks codex-pre-tool-use" }] }],
-//	    "PostToolUse": [{ "matcher": "apply_patch|Edit|Write|mcp__.*", "hooks": [{ "type": "command", "command": "/path/to/my-hooks codex-post-tool-use" }] }],
+//	    "PostToolUse": [{ "matcher": "apply_patch|mcp__.*", "hooks": [{ "type": "command", "command": "/path/to/my-hooks codex-post-tool-use" }] }],
 //	    "UserPromptSubmit": [{ "hooks": [{ "type": "command", "command": "/path/to/my-hooks codex-user-prompt-submit" }] }]
 //	  }
 //	}

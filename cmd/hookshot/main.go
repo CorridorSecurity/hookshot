@@ -482,10 +482,11 @@ func installCodex(binaryPath string) error {
 		config = make(map[string]any)
 	}
 
-	// Codex hook config follows the same shape as Claude Code's settings, but
-	// lives in ~/.codex/hooks.json. PostToolUse matches "apply_patch|Edit|Write"
-	// because Codex uses apply_patch for file edits in addition to Write/Edit
-	// aliases.
+	// Codex hook config follows the same JSON shape as Claude Code's
+	// settings but lives in ~/.codex/hooks.json. Matchers include
+	// "mcp__.*" so MCP tool calls reach the hook binary. "apply_patch"
+	// alone covers Codex file edits — Codex emits "Edit" and "Write" as
+	// matcher aliases for apply_patch, so they're redundant here.
 	hooks := map[string]any{
 		"Stop": []map[string]any{{
 			"hooks": []map[string]any{{
@@ -494,10 +495,6 @@ func installCodex(binaryPath string) error {
 			}},
 		}},
 		"PreToolUse": []map[string]any{{
-			// Include mcp__.* so MCP tool calls also reach the hook
-			// binary. Without this, the codex-pre-tool-use handler is
-			// never invoked for MCP tools and any OnBeforeExecution
-			// policy that enforces MCP allowlists is silently bypassed.
 			"matcher": "Bash|apply_patch|mcp__.*",
 			"hooks": []map[string]any{{
 				"type":    "command",
@@ -505,7 +502,7 @@ func installCodex(binaryPath string) error {
 			}},
 		}},
 		"PostToolUse": []map[string]any{{
-			"matcher": "apply_patch|Edit|Write|mcp__.*",
+			"matcher": "apply_patch|mcp__.*",
 			"hooks": []map[string]any{{
 				"type":    "command",
 				"command": binaryPath + " codex-post-tool-use",
@@ -533,7 +530,6 @@ func installCodex(binaryPath string) error {
 	}
 
 	fmt.Println("  Installed hooks: Stop, PreToolUse, PostToolUse, UserPromptSubmit")
-	fmt.Println("  Note: Codex hooks require codex_hooks = true under [features] in ~/.codex/config.toml")
 	return nil
 }
 

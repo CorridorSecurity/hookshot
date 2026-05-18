@@ -7,6 +7,7 @@ import (
 
 	"github.com/CorridorSecurity/hookshot/cascade"
 	"github.com/CorridorSecurity/hookshot/claude"
+	"github.com/CorridorSecurity/hookshot/codex"
 	"github.com/CorridorSecurity/hookshot/cursor"
 	"github.com/CorridorSecurity/hookshot/droid"
 	"github.com/CorridorSecurity/hookshot/internal"
@@ -724,8 +725,11 @@ func OnAfterFileEdit(handler FileEditHandler) {
 	// multiple files in a single call. For each file in the patch we invoke
 	// the user's handler exactly once with a populated FileEditContext, and
 	// we combine the decisions across files: a Block from any file wins,
-	// otherwise context strings are concatenated. Configure the hook with a
-	// matcher like "apply_patch|Edit|Write" in hooks.json.
+	// otherwise context strings are concatenated. The parser used here is
+	// also exported as codex.ParseApplyPatch for callers that want raw
+	// access. Configure the hook with matcher "apply_patch|mcp__.*" in
+	// hooks.json — "Edit" and "Write" matcher aliases exist but are
+	// redundant with "apply_patch".
 	Register("codex-post-tool-use", func() {
 		Run(func(input claude.PostToolUseInput) claude.PostToolUseOutput {
 			if input.ToolName != "Write" && input.ToolName != "Edit" && input.ToolName != "apply_patch" {
@@ -774,7 +778,7 @@ func OnAfterFileEdit(handler FileEditHandler) {
 			}
 			json.Unmarshal(input.ToolInput, &applyInput)
 
-			files := parseCodexApplyPatch(applyInput.Command)
+			files := codex.ParseApplyPatch(applyInput.Command)
 			if len(files) == 0 {
 				// We could not parse anything actionable out of the patch.
 				// Fall back to invoking the handler once with whatever raw
@@ -801,13 +805,17 @@ func OnAfterFileEdit(handler FileEditHandler) {
 				blockReasons []string
 				contexts     []string
 			)
-			invoke := func(filePath string, f codexApplyPatchFile) {
+			invoke := func(filePath string, f codex.PatchFile) {
+				edits := make([]FileEdit, 0, len(f.Edits))
+				for _, e := range f.Edits {
+					edits = append(edits, FileEdit{OldString: e.OldString, NewString: e.NewString})
+				}
 				ctx := FileEditContext{
 					Platform:      PlatformCodex,
 					SessionID:     input.SessionID,
 					FilePath:      filePath,
 					NewFilePath:   f.NewFilePath,
-					Edits:         f.Edits,
+					Edits:         edits,
 					Cwd:           input.Cwd,
 					RawClaudeCode: &input,
 				}

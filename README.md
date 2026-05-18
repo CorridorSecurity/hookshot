@@ -99,20 +99,17 @@ hookshot install --binary /path/to/my-hooks
 
 ### OpenAI Codex (`~/.codex/hooks.json`)
 
-Codex hooks are gated behind a feature flag. Enable it in `~/.codex/config.toml`:
-
-```toml
-[features]
-codex_hooks = true
-```
-
-Then configure the hooks themselves:
+Codex hooks are enabled by default (the `hooks` feature flag in Codex is
+stable and on). No `~/.codex/config.toml` change is required. If your
+organization disabled hooks, set `[features].hooks = true` to turn them
+back on — `codex_hooks` is a deprecated alias for the same flag.
 
 ```json
 {
   "hooks": {
     "Stop": [{ "hooks": [{ "type": "command", "command": "/path/to/my-hooks codex-stop" }] }],
-    "PreToolUse": [{ "matcher": "Bash|apply_patch|mcp__.*", "hooks": [{ "type": "command", "command": "/path/to/my-hooks codex-pre-tool-use" }] }]
+    "PreToolUse": [{ "matcher": "Bash|apply_patch|mcp__.*", "hooks": [{ "type": "command", "command": "/path/to/my-hooks codex-pre-tool-use" }] }],
+    "PostToolUse": [{ "matcher": "apply_patch|mcp__.*", "hooks": [{ "type": "command", "command": "/path/to/my-hooks codex-post-tool-use" }] }]
   }
 }
 ```

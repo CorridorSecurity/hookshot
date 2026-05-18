@@ -1,37 +1,37 @@
-package hookshot
+package codex
 
 import (
 	"reflect"
 	"testing"
 )
 
-func TestParseCodexApplyPatch_AddFile(t *testing.T) {
+func TestParseApplyPatch_AddFile(t *testing.T) {
 	patch := "*** Begin Patch\n" +
 		"*** Add File: secrets/api_key.txt\n" +
 		"+sk-deadbeef\n" +
 		"+second line\n" +
 		"*** End Patch\n"
 
-	got := parseCodexApplyPatch(patch)
-	want := []codexApplyPatchFile{{
+	got := ParseApplyPatch(patch)
+	want := []PatchFile{{
 		Operation: "add",
 		FilePath:  "secrets/api_key.txt",
-		Edits: []FileEdit{{
+		Edits: []PatchEdit{{
 			OldString: "",
 			NewString: "sk-deadbeef\nsecond line",
 		}},
 	}}
 	if !reflect.DeepEqual(got, want) {
-		t.Errorf("parseCodexApplyPatch(add) =\n  %+v\nwant\n  %+v", got, want)
+		t.Errorf("ParseApplyPatch(add) =\n  %+v\nwant\n  %+v", got, want)
 	}
 }
 
-func TestParseCodexApplyPatch_DeleteFile(t *testing.T) {
+func TestParseApplyPatch_DeleteFile(t *testing.T) {
 	patch := "*** Begin Patch\n" +
 		"*** Delete File: old/secrets.env\n" +
 		"*** End Patch\n"
 
-	got := parseCodexApplyPatch(patch)
+	got := ParseApplyPatch(patch)
 	if len(got) != 1 {
 		t.Fatalf("got %d files, want 1", len(got))
 	}
@@ -46,7 +46,7 @@ func TestParseCodexApplyPatch_DeleteFile(t *testing.T) {
 	}
 }
 
-func TestParseCodexApplyPatch_UpdateFile(t *testing.T) {
+func TestParseApplyPatch_UpdateFile(t *testing.T) {
 	patch := "*** Begin Patch\n" +
 		"*** Update File: src/auth.go\n" +
 		"@@ func login\n" +
@@ -57,7 +57,7 @@ func TestParseCodexApplyPatch_UpdateFile(t *testing.T) {
 		" }\n" +
 		"*** End Patch\n"
 
-	got := parseCodexApplyPatch(patch)
+	got := ParseApplyPatch(patch)
 	if len(got) != 1 {
 		t.Fatalf("got %d files, want 1", len(got))
 	}
@@ -70,7 +70,7 @@ func TestParseCodexApplyPatch_UpdateFile(t *testing.T) {
 	if len(got[0].Edits) != 1 {
 		t.Fatalf("Edits = %+v, want 1 edit", got[0].Edits)
 	}
-	wantEdit := FileEdit{
+	wantEdit := PatchEdit{
 		OldString: "    token := \"hardcoded\"",
 		NewString: "    token := os.Getenv(\"TOKEN\")",
 	}
@@ -79,7 +79,7 @@ func TestParseCodexApplyPatch_UpdateFile(t *testing.T) {
 	}
 }
 
-func TestParseCodexApplyPatch_UpdateFile_MultipleHunks(t *testing.T) {
+func TestParseApplyPatch_UpdateFile_MultipleHunks(t *testing.T) {
 	patch := "*** Begin Patch\n" +
 		"*** Update File: a.go\n" +
 		"@@\n" +
@@ -90,22 +90,22 @@ func TestParseCodexApplyPatch_UpdateFile_MultipleHunks(t *testing.T) {
 		"+qux\n" +
 		"*** End Patch\n"
 
-	got := parseCodexApplyPatch(patch)
+	got := ParseApplyPatch(patch)
 	if len(got) != 1 {
 		t.Fatalf("got %d files, want 1", len(got))
 	}
 	if len(got[0].Edits) != 2 {
 		t.Fatalf("Edits = %+v, want 2 edits", got[0].Edits)
 	}
-	if got[0].Edits[0] != (FileEdit{OldString: "foo", NewString: "bar"}) {
+	if got[0].Edits[0] != (PatchEdit{OldString: "foo", NewString: "bar"}) {
 		t.Errorf("Edits[0] = %+v", got[0].Edits[0])
 	}
-	if got[0].Edits[1] != (FileEdit{OldString: "baz", NewString: "qux"}) {
+	if got[0].Edits[1] != (PatchEdit{OldString: "baz", NewString: "qux"}) {
 		t.Errorf("Edits[1] = %+v", got[0].Edits[1])
 	}
 }
 
-func TestParseCodexApplyPatch_MultiFile(t *testing.T) {
+func TestParseApplyPatch_MultiFile(t *testing.T) {
 	patch := "*** Begin Patch\n" +
 		"*** Add File: new.txt\n" +
 		"+hello\n" +
@@ -116,7 +116,7 @@ func TestParseCodexApplyPatch_MultiFile(t *testing.T) {
 		"*** Delete File: stale.txt\n" +
 		"*** End Patch\n"
 
-	got := parseCodexApplyPatch(patch)
+	got := ParseApplyPatch(patch)
 	if len(got) != 3 {
 		t.Fatalf("got %d files, want 3", len(got))
 	}
@@ -131,7 +131,7 @@ func TestParseCodexApplyPatch_MultiFile(t *testing.T) {
 	}
 }
 
-func TestParseCodexApplyPatch_MoveTo(t *testing.T) {
+func TestParseApplyPatch_MoveTo(t *testing.T) {
 	patch := "*** Begin Patch\n" +
 		"*** Update File: old/path.go\n" +
 		"*** Move to: new/path.go\n" +
@@ -140,7 +140,7 @@ func TestParseCodexApplyPatch_MoveTo(t *testing.T) {
 		"+bar\n" +
 		"*** End Patch\n"
 
-	got := parseCodexApplyPatch(patch)
+	got := ParseApplyPatch(patch)
 	if len(got) != 1 {
 		t.Fatalf("got %d files, want 1", len(got))
 	}
@@ -152,9 +152,7 @@ func TestParseCodexApplyPatch_MoveTo(t *testing.T) {
 	}
 }
 
-func TestParseCodexApplyPatch_LeadingWrapper(t *testing.T) {
-	// Some Codex invocations wrap the patch in a here-doc style header.
-	// The parser should skip everything before the Begin Patch marker.
+func TestParseApplyPatch_LeadingWrapper(t *testing.T) {
 	patch := "apply_patch <<'PATCH'\n" +
 		"*** Begin Patch\n" +
 		"*** Add File: foo.txt\n" +
@@ -162,7 +160,7 @@ func TestParseCodexApplyPatch_LeadingWrapper(t *testing.T) {
 		"*** End Patch\n" +
 		"PATCH\n"
 
-	got := parseCodexApplyPatch(patch)
+	got := ParseApplyPatch(patch)
 	if len(got) != 1 {
 		t.Fatalf("got %d files, want 1", len(got))
 	}
@@ -171,11 +169,11 @@ func TestParseCodexApplyPatch_LeadingWrapper(t *testing.T) {
 	}
 }
 
-func TestParseCodexApplyPatch_EmptyAndMalformed(t *testing.T) {
-	if files := parseCodexApplyPatch(""); files != nil {
+func TestParseApplyPatch_EmptyAndMalformed(t *testing.T) {
+	if files := ParseApplyPatch(""); files != nil {
 		t.Errorf("empty input should yield nil, got %+v", files)
 	}
-	if files := parseCodexApplyPatch("not a patch"); files != nil {
+	if files := ParseApplyPatch("not a patch"); files != nil {
 		t.Errorf("non-patch input should yield nil, got %+v", files)
 	}
 }

@@ -187,11 +187,13 @@ Handles post-file-edit events.
 
 **Registers:** `claude-after-file-edit`, `cursor-after-file-edit`, `droid-after-file-edit`, `cascade-post-write-code`, `codex-post-tool-use`
 
-For Codex, the underlying PostToolUse handler also matches `apply_patch` in addition to `Write` and `Edit`. Configure the hook with `matcher: "apply_patch|Edit|Write|mcp__.*"` in `~/.codex/hooks.json`.
+For Codex, the underlying PostToolUse handler matches `apply_patch` (which is how Codex performs all file edits). Configure the hook with `matcher: "apply_patch|mcp__.*"` in `~/.codex/hooks.json`.
 
 For Codex `apply_patch`, the unified bridge parses the unified-diff envelope in `tool_input.command` and invokes your handler **once per file** in the patch, with `FilePath` set to the file declared in the `*** Add/Update/Delete File:` header and `Edits` populated from each hunk. If any of those invocations returns `FileEditBlock`, the reasons are concatenated and emitted as a single `PostToolBlock`.
 
 For renames (`*** Update File: <src>` + `*** Move to: <dst>`) the handler is invoked **twice** — once with `FilePath` set to the source and once with `FilePath` set to the destination — and `NewFilePath` is populated on both invocations. This means a FilePath-only allowlist that permits the benign source still receives a separate call for the destination so it can deny something like `../../.ssh/authorized_keys`. Handlers that want to detect the rename relationship should check `ctx.NewFilePath != "" && ctx.NewFilePath != ctx.FilePath`.
+
+The same parser is exported as `codex.ParseApplyPatch` for callers that want to parse a patch envelope themselves.
 
 ### FileEdit
 

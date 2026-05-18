@@ -12,10 +12,10 @@
 //
 // # Configuration
 //
-// Codex hooks are enabled behind a feature flag in ~/.codex/config.toml:
-//
-//	[features]
-//	codex_hooks = true
+// Codex hooks are enabled by default in current releases (the `hooks`
+// feature flag is stable). If your organization disabled them, set
+// `[features].hooks = true` in ~/.codex/config.toml to re-enable. The
+// older `codex_hooks` key still works as a deprecated alias.
 //
 // Configure hook commands in ~/.codex/hooks.json (or inline under [hooks] in
 // ~/.codex/config.toml):
@@ -30,7 +30,7 @@
 //	    ],
 //	    "PostToolUse": [
 //	      {
-//	        "matcher": "apply_patch|Edit|Write|mcp__.*",
+//	        "matcher": "apply_patch|mcp__.*",
 //	        "hooks": [{ "type": "command", "command": "/path/to/hook codex-post-tool-use" }]
 //	      }
 //	    ],
