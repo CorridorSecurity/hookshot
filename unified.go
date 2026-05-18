@@ -958,6 +958,7 @@ func OnPromptSubmit(handler PromptHandler) {
 				Platform:      PlatformClaude,
 				SessionID:     input.SessionID,
 				Prompt:        input.Prompt,
+				Cwd:           input.Cwd,
 				RawClaudeCode: &input,
 			}
 
@@ -998,6 +999,7 @@ func OnPromptSubmit(handler PromptHandler) {
 				Platform:  PlatformDroid,
 				SessionID: input.SessionID,
 				Prompt:    input.Prompt,
+				Cwd:       input.Cwd,
 				RawDroid:  &input,
 			}
 
