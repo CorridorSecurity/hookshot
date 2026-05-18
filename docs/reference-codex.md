@@ -1,155 +1,147 @@
 # OpenAI Codex API Reference
 
-Platform-specific types and helpers for OpenAI Codex hooks. Use these when you need features not available in the unified API.
+Codex hooks use the same JSON wire format as Claude Code hooks. The `codex`
+Go package re-exports the relevant types and helpers from `claude` so your
+code can stay platform-explicit. **For type definitions and helper-function
+signatures see [reference-claude.md](reference-claude.md)** — this page only
+documents what differs on Codex.
 
-Codex hooks use the same JSON wire format as Claude Code hooks, configured in `~/.codex/hooks.json` or inline `[hooks]` tables in `~/.codex/config.toml`. The `codex` Go package re-exports the relevant `claude` types so your code can stay platform-explicit while still benefiting from the shared types.
+See the upstream spec at <https://developers.openai.com/codex/hooks>.
 
-Codex hooks are enabled by default (the `hooks` feature flag is stable in current Codex releases). If your organization disabled hooks, set `[features].hooks = true` in `~/.codex/config.toml` to re-enable.
+## Configuration
 
-See the upstream spec at https://developers.openai.com/codex/hooks.
+Codex hooks are enabled by default (the `hooks` feature flag is stable). If
+your organization disabled hooks, set `[features].hooks = true` in
+`~/.codex/config.toml` to re-enable. The older `codex_hooks` key still works
+as a deprecated alias.
+
+Hook commands live in `~/.codex/hooks.json` (or an inline `[hooks]` table in
+`~/.codex/config.toml`). The minimum useful layout:
+
+```json
+{
+  "hooks": {
+    "PreToolUse":       [{ "matcher": "Bash|apply_patch|mcp__.*", "hooks": [{ "type": "command", "command": "/path/to/my-hooks codex-pre-tool-use" }] }],
+    "PostToolUse":      [{ "matcher": "apply_patch|mcp__.*",       "hooks": [{ "type": "command", "command": "/path/to/my-hooks codex-post-tool-use" }] }],
+    "UserPromptSubmit": [{                                          "hooks": [{ "type": "command", "command": "/path/to/my-hooks codex-user-prompt-submit" }] }],
+    "Stop":             [{                                          "hooks": [{ "type": "command", "command": "/path/to/my-hooks codex-stop", "timeout": 30 }] }]
+  }
+}
+```
+
+`hookshot install --codex --binary /path/to/my-hooks` will generate this for
+you.
+
+> **Why `mcp__.*` is in the matcher.** Codex passes MCP tool names to
+> PreToolUse / PostToolUse using the `mcp__server__tool` convention.
+> Omitting `mcp__.*` would silently bypass any `OnBeforeExecution` policy
+> meant to enforce MCP allowlists.
+>
+> **Why `Edit|Write` is not in the matcher.** Codex emits `Edit` and `Write`
+> as *matcher aliases* for `apply_patch`. The canonical `tool_name` Codex
+> sends to the hook is always `apply_patch`, so a matcher of `apply_patch`
+> alone covers every file-edit call.
 
 ## Events
 
-| Event | Input | Output | Description |
-|-------|-------|--------|-------------|
-| SessionStart | `SessionStartInput` | `SessionStartOutput` | Session started or resumed |
-| PreToolUse | `PreToolUseInput` | `PreToolUseOutput` | Before tool execution (Bash, apply_patch, MCP) |
-| PermissionRequest | `PermissionRequestInput` | `PermissionRequestOutput` | Approval prompt about to surface |
-| PostToolUse | `PostToolUseInput` | `PostToolUseOutput` | After tool execution |
-| UserPromptSubmit | `UserPromptSubmitInput` | `UserPromptSubmitOutput` | User submitted a prompt |
-| Stop | `StopInput` | `StopOutput` | Turn finished responding |
+| Event | Types | Codex notes |
+|---|---|---|
+| SessionStart | `codex.SessionStartInput` / `Output` | `source` is `startup`, `resume`, or `clear`. |
+| PreToolUse | `codex.PreToolUseInput` / `Output` | `tool_name` is `Bash`, `apply_patch`, or `mcp__server__tool`. See **Ask is not enforced** below. |
+| PermissionRequest | `codex.PermissionRequestInput` / `Output` | Codex-specific. Fires only when Codex is about to surface an approval prompt; see below. |
+| PostToolUse | `codex.PostToolUseInput` / `Output` | See **apply_patch on the unified API** below. |
+| UserPromptSubmit | `codex.UserPromptSubmitInput` / `Output` | Same shape as Claude. |
+| Stop | `codex.StopInput` / `Output` | Same shape as Claude; Codex expects JSON on stdout (not plain text). |
 
----
+Codex also sends a `model` field (active model slug) on every hook event and
+a `turn_id` field on turn-scoped events (`PreToolUse`, `PermissionRequest`,
+`PostToolUse`, `UserPromptSubmit`, `Stop`). These aren't on the shared
+`BaseInput` struct — read them with `hookshot.ReadRawInput` if you need
+them. Stop also carries `last_assistant_message`.
 
-## Common Types
+Codex enforces `continue: false` on `SessionStart`, `UserPromptSubmit`,
+`PostToolUse`, and `Stop`. For `PreToolUse` and `PermissionRequest`,
+`continue`, `stopReason`, and `suppressOutput` are parsed but currently fail
+open.
 
-### BaseInput
+## PreToolUse: Ask is not enforced
 
-All Codex hook inputs include these fields:
+Codex honors `permissionDecision: "deny"` (or the older `decision: "block"`
+shape) on Bash and `apply_patch`. `"allow"`, `"ask"`, `updatedInput`,
+`additionalContext`, `continue: false`, `stopReason`, and `suppressOutput`
+are parsed but fail open today.
 
-```go
-type BaseInput struct {
-    SessionID      string `json:"session_id"`
-    TranscriptPath string `json:"transcript_path"`
-    Cwd            string `json:"cwd"`
-    PermissionMode string `json:"permission_mode"`
-    HookEventName  string `json:"hook_event_name"`
-}
-```
+Because `"ask"` falls open, `hookshot.OnBeforeExecution` returning
+`AskExecution(...)` is rewritten to `Deny` on Codex so policies that require
+user confirmation aren't silently bypassed. The platform-level `codex.Ask`
+helper still emits `"ask"` in the JSON for forward-compat testing.
 
-Codex also sends a `model` field (active model slug) on every hook event, and a `turn_id` field on turn-scoped events (`PreToolUse`, `PermissionRequest`, `PostToolUse`, `UserPromptSubmit`, `Stop`). These fields aren't represented on the shared `BaseInput` struct, but you can read them by binding the raw JSON yourself with `hookshot.ReadRawInput`.
+If you want to react when Codex is actually about to prompt the user,
+register a separate handler for the **PermissionRequest** event below — that
+event's enforcement is supported.
 
-### BaseOutput
+## PermissionRequest (Codex-only)
 
-Common fields for any hook output:
+Fires when Codex is about to ask for approval (shell escalation, managed-
+network approval). Doesn't run for commands that don't need approval. The
+`tool_input` may include a `description` field with a human-readable reason.
 
-```go
-type BaseOutput struct {
-    Continue       *bool  `json:"continue,omitempty"`
-    StopReason     string `json:"stopReason,omitempty"`
-    SuppressOutput bool   `json:"suppressOutput,omitempty"` // parsed but not enforced today
-    SystemMessage  string `json:"systemMessage,omitempty"`
-}
-```
+If multiple matching hooks return decisions, any `deny` wins. Otherwise an
+`allow` lets the request proceed without surfacing the approval prompt. If
+no matching hook decides, Codex uses the normal approval flow. `updatedInput`,
+`updatedPermissions`, and `interrupt` are reserved for future behavior and
+fail closed today.
 
-Codex enforces `continue: false` on `SessionStart`, `UserPromptSubmit`, `PostToolUse`, and `Stop`. For `PreToolUse` and `PermissionRequest`, `continue`, `stopReason`, and `suppressOutput` are parsed but currently fail open.
+Helpers: `codex.AllowPermission()` and `codex.DenyPermission(message string)`.
 
----
+## apply_patch on the unified API
 
-## SessionStart
+`hookshot.OnAfterFileEdit` parses Codex `apply_patch` events by unpacking
+the unified-diff envelope in `tool_input.command` and invoking your handler
+**once per file** mentioned in the patch. Each invocation receives a fully
+populated `FileEditContext`:
 
-Called when a session starts or resumes. The `matcher` regex is applied to the `source` field. Current runtime values are `startup`, `resume`, and `clear`.
+- `FilePath` is the path declared in the `*** Add File:`,
+  `*** Update File:`, or `*** Delete File:` section.
+- `NewFilePath` is the destination path for rename operations
+  (`*** Move to:`); empty otherwise.
+- `Edits` is `[{OldString: "", NewString: <added content>}]` for Add, one
+  `FileEdit` per hunk for Update, and empty for Delete.
 
-### SessionStartInput
+For renames (`*** Update File: <src>` followed by `*** Move to: <dst>`) the
+handler is invoked **twice** — once with `FilePath` set to the source and
+once with `FilePath` set to the destination — and `NewFilePath` is populated
+on both. This means a FilePath-only allowlist that permits the benign source
+still receives a separate call for the destination so it can deny moves to
+sensitive locations like `../../.ssh/authorized_keys`. Policies that want
+to react specifically to renames should check
+`ctx.NewFilePath != "" && ctx.NewFilePath != ctx.FilePath`.
 
-```go
-type SessionStartInput struct {
-    BaseInput
-    Source string `json:"source"` // "startup", "resume", "clear"
-}
-```
+If any per-file invocation returns `FileEditBlock`, the unified bridge
+concatenates the reasons and emits a single `PostToolBlock`.
 
-### SessionStartOutput
+The same parser is also exported as
+`codex.ParseApplyPatch(rawCommand string) []codex.PatchFile` for callers
+that want to parse a patch envelope themselves — for example from the raw
+`codex.PostToolUseInput.ToolInput`.
 
-```go
-type SessionStartOutput struct {
-    BaseOutput
-    HookSpecificOutput *SessionStartHookOutput `json:"hookSpecificOutput,omitempty"`
-}
+## PostToolUse semantics
 
-type SessionStartHookOutput struct {
-    HookEventName     string `json:"hookEventName,omitempty"`
-    AdditionalContext string `json:"additionalContext,omitempty"`
-}
-```
+`decision: "block"` doesn't undo the completed tool call. Codex records the
+feedback, replaces the tool result with it, and continues the model from
+the hook-provided message. To stop normal processing of the original tool
+result, also return `continue: false`. `updatedMCPToolOutput` and
+`suppressOutput` are parsed but not supported today.
 
-### Helper Functions
+## Stop semantics
 
-```go
-func SessionStartOK() SessionStartOutput
-func SessionStartContext(context string) SessionStartOutput
-```
+`decision: "block"` doesn't reject the turn. Instead it tells Codex to
+continue and creates a new continuation prompt that acts as a new user
+prompt, using `reason` as that prompt text. If any matching Stop hook
+returns `continue: false`, that takes precedence over continuation
+decisions from other matching Stop hooks.
 
-### Example
-
-```go
-hookshot.Register("codex-session-start", func() {
-    hookshot.Run(func(input codex.SessionStartInput) codex.SessionStartOutput {
-        return codex.SessionStartContext("Project uses Go 1.21+")
-    })
-})
-```
-
----
-
-## PreToolUse
-
-Called before Codex executes a tool. Currently intercepts simple Bash commands, file edits performed through `apply_patch`, and MCP tool calls. The `matcher` regex is applied to `tool_name` and matcher aliases — `apply_patch` also matches `Edit` and `Write`.
-
-### PreToolUseInput
-
-```go
-type PreToolUseInput struct {
-    BaseInput
-    ToolName  string          `json:"tool_name"` // "Bash", "apply_patch", or "mcp__server__tool"
-    ToolInput json.RawMessage `json:"tool_input"`
-    ToolUseID string          `json:"tool_use_id"`
-}
-```
-
-For `Bash` and `apply_patch`, the `tool_input` includes a `command` field. For MCP tools it carries all the arguments passed to the MCP call.
-
-### PreToolUseOutput
-
-```go
-type PreToolUseOutput struct {
-    BaseOutput
-    HookSpecificOutput *PreToolUseHookOutput `json:"hookSpecificOutput,omitempty"`
-}
-
-type PreToolUseHookOutput struct {
-    HookEventName            string         `json:"hookEventName,omitempty"`
-    PermissionDecision       string         `json:"permissionDecision,omitempty"`
-    PermissionDecisionReason string         `json:"permissionDecisionReason,omitempty"`
-    UpdatedInput             map[string]any `json:"updatedInput,omitempty"`
-}
-```
-
-Codex honors `permissionDecision: "deny"` (or the older `decision: "block"` shape) on Bash and `apply_patch`. `"allow"`, `"ask"`, `updatedInput`, `additionalContext`, `continue: false`, `stopReason`, and `suppressOutput` are parsed but fail open today.
-
-> **Fail-closed `Ask` on the unified API.** Because Codex doesn't enforce `"ask"` yet, `hookshot.OnBeforeExecution` returning `AskExecution(...)` is translated to a `Deny` on Codex so policies that require user confirmation aren't silently bypassed. If you call the platform-level `codex.Ask` helper directly, the output JSON still encodes `"ask"` (so it round-trips with the upstream protocol) — that's only useful for forward-compat testing today. If you want to react when Codex is actually about to prompt the user, register a separate handler for the [PermissionRequest event](#permissionrequest) — that one's enforcement is supported.
-
-### Helper Functions
-
-```go
-func Deny(reason string) PreToolUseOutput     // Enforced: blocks Bash and apply_patch
-func Allow(reason string) PreToolUseOutput    // Parsed but currently falls through
-func AllowSilent() PreToolUseOutput           // Parsed but currently falls through
-func Ask(reason string) PreToolUseOutput      // Parsed but currently falls through (unified API rewrites to Deny)
-func PassThrough() PreToolUseOutput           // Empty output, normal flow
-```
-
-### Example
+## Example
 
 ```go
 hookshot.Register("codex-pre-tool-use", func() {
@@ -166,278 +158,6 @@ hookshot.Register("codex-pre-tool-use", func() {
 })
 ```
 
-You can also use exit code `2` with the reason written to stderr instead of returning the JSON output, which is what `RunE` does for you when the handler returns an error.
-
----
-
-## PermissionRequest
-
-Called when Codex is about to ask for approval (shell escalation, managed-network approval). It doesn't run for commands that don't need approval.
-
-### PermissionRequestInput
-
-```go
-type PermissionRequestInput struct {
-    BaseInput
-    ToolName  string          `json:"tool_name"`
-    ToolInput json.RawMessage `json:"tool_input"`
-    ToolUseID string          `json:"tool_use_id"`
-}
-```
-
-The `tool_input` may include a `description` field with a human-readable approval reason.
-
-### PermissionRequestOutput
-
-```go
-type PermissionRequestOutput struct {
-    BaseOutput
-    HookSpecificOutput *PermissionRequestHookOutput `json:"hookSpecificOutput,omitempty"`
-}
-
-type PermissionRequestHookOutput struct {
-    HookEventName string                     `json:"hookEventName,omitempty"`
-    Decision      *PermissionRequestDecision `json:"decision,omitempty"`
-}
-
-type PermissionRequestDecision struct {
-    Behavior string `json:"behavior"`           // "allow" or "deny"
-    Message  string `json:"message,omitempty"`  // For "deny"
-}
-```
-
-If multiple matching hooks return decisions, any `deny` wins. Otherwise, an `allow` lets the request proceed without surfacing the approval prompt. If no matching hook decides, Codex uses the normal approval flow. `updatedInput`, `updatedPermissions`, and `interrupt` are reserved for future behavior and fail closed today.
-
-### Helper Functions
-
-```go
-func AllowPermission() PermissionRequestOutput
-func DenyPermission(message string) PermissionRequestOutput
-```
-
----
-
-## PostToolUse
-
-Called after Bash, `apply_patch`, or MCP tool calls produce output. For Bash, also runs after non-zero exits. Can't undo side effects.
-
-### PostToolUseInput
-
-```go
-type PostToolUseInput struct {
-    BaseInput
-    ToolName     string          `json:"tool_name"`
-    ToolInput    json.RawMessage `json:"tool_input"`
-    ToolResponse json.RawMessage `json:"tool_response"`
-    ToolUseID    string          `json:"tool_use_id"`
-}
-```
-
-### PostToolUseOutput
-
-```go
-type PostToolUseOutput struct {
-    BaseOutput
-    Decision           string                 `json:"decision,omitempty"`
-    Reason             string                 `json:"reason,omitempty"`
-    HookSpecificOutput *PostToolUseHookOutput `json:"hookSpecificOutput,omitempty"`
-}
-
-type PostToolUseHookOutput struct {
-    HookEventName     string `json:"hookEventName,omitempty"`
-    AdditionalContext string `json:"additionalContext,omitempty"`
-}
-```
-
-`decision: "block"` doesn't undo the completed tool call. Codex records the feedback, replaces the tool result with it, and continues the model from the hook-provided message. To stop normal processing of the original tool result, also return `continue: false`. `updatedMCPToolOutput` and `suppressOutput` are parsed but not supported today.
-
-### Helper Functions
-
-```go
-func PostToolOK() PostToolUseOutput
-func PostToolBlock(reason string) PostToolUseOutput
-func PostToolContext(context string) PostToolUseOutput
-```
-
-### apply_patch parsing on the unified API
-
-`hookshot.OnAfterFileEdit` parses Codex `apply_patch` events by unpacking the unified-diff envelope in `tool_input.command` and invoking your handler **once per file** mentioned in the patch. Each invocation receives a fully populated `FileEditContext`:
-
-- `FilePath` is the path declared in the `*** Add File:`, `*** Update File:`, or `*** Delete File:` section.
-- `NewFilePath` is the destination path for rename operations (`*** Move to:`); empty otherwise.
-- `Edits` is `[{OldString: "", NewString: <added content>}]` for Add, one `FileEdit` per hunk for Update (with removed lines as `OldString` and added lines as `NewString`), and empty for Delete.
-
-For renames (`*** Update File: <src>` followed by `*** Move to: <dst>`), the handler is invoked **twice** — once with `FilePath` set to the source and once with `FilePath` set to the destination — and `NewFilePath` is populated on both invocations. This ensures that a FilePath-only allowlist which permits the benign source path still receives a separate call for the destination path and can deny moves to sensitive locations like `../../.ssh/authorized_keys`. Policies that want to react specifically to renames should check `ctx.NewFilePath != "" && ctx.NewFilePath != ctx.FilePath`.
-
-If any of those per-file invocations returns `FileEditBlock`, the unified bridge concatenates the reasons and emits a single `PostToolBlock` so Codex replaces the tool result with the combined feedback.
-
-The same parser is also exported as `codex.ParseApplyPatch(rawCommand string) []codex.PatchFile` for callers that want to parse a patch envelope themselves (for example, from the raw `codex.PostToolUseInput.ToolInput`).
-
-### Example
-
-```go
-hookshot.Register("codex-post-tool-use", func() {
-    hookshot.Run(func(input codex.PostToolUseInput) codex.PostToolUseOutput {
-        if input.ToolName == "apply_patch" {
-            return codex.PostToolContext("Generated files were updated.")
-        }
-        return codex.PostToolOK()
-    })
-})
-```
-
----
-
-## UserPromptSubmit
-
-Called when the user submits a prompt. `matcher` is ignored for this event.
-
-### UserPromptSubmitInput
-
-```go
-type UserPromptSubmitInput struct {
-    BaseInput
-    Prompt string `json:"prompt"`
-}
-```
-
-### UserPromptSubmitOutput
-
-```go
-type UserPromptSubmitOutput struct {
-    BaseOutput
-    Decision           string                      `json:"decision,omitempty"`
-    Reason             string                      `json:"reason,omitempty"`
-    HookSpecificOutput *UserPromptSubmitHookOutput `json:"hookSpecificOutput,omitempty"`
-}
-
-type UserPromptSubmitHookOutput struct {
-    HookEventName     string `json:"hookEventName,omitempty"`
-    AdditionalContext string `json:"additionalContext,omitempty"`
-}
-```
-
-Return `decision: "block"` to reject the prompt. Otherwise, plain text on stdout (or `additionalContext` in JSON) is added as extra developer context.
-
-### Helper Functions
-
-```go
-func AllowPrompt() UserPromptSubmitOutput
-func BlockPrompt(reason string) UserPromptSubmitOutput
-func AddContext(context string) UserPromptSubmitOutput
-```
-
-### Example
-
-```go
-hookshot.Register("codex-user-prompt-submit", func() {
-    hookshot.Run(func(input codex.UserPromptSubmitInput) codex.UserPromptSubmitOutput {
-        if strings.Contains(input.Prompt, "api_key=") {
-            return codex.BlockPrompt("Don't include API keys in prompts")
-        }
-        return codex.AllowPrompt()
-    })
-})
-```
-
----
-
-## Stop
-
-Called when the turn finishes responding. `matcher` is ignored for this event. Codex expects JSON on stdout when the hook exits 0 — plain text is invalid here.
-
-### StopInput
-
-```go
-type StopInput struct {
-    BaseInput
-    StopHookActive bool `json:"stop_hook_active"`
-}
-```
-
-Codex also sends `last_assistant_message` (latest assistant message text) on Stop input. Read it via `hookshot.ReadRawInput` if needed.
-
-### StopOutput
-
-```go
-type StopOutput struct {
-    BaseOutput
-    Decision string `json:"decision,omitempty"` // "block" to continue the turn
-    Reason   string `json:"reason,omitempty"`
-}
-```
-
-For this event, `decision: "block"` doesn't reject the turn. Instead, it tells Codex to continue and creates a new continuation prompt that acts as a new user prompt, using `reason` as that prompt text. If any matching Stop hook returns `continue: false`, that takes precedence over continuation decisions from other matching Stop hooks.
-
-### Helper Functions
-
-```go
-func Continue() StopOutput               // Allow stopping
-func Block(reason string) StopOutput     // Continue the turn with reason as the next prompt
-func StopWith(reason string) StopOutput  // Halt Codex entirely (continue=false)
-```
-
-### Example
-
-```go
-hookshot.Register("codex-stop", func() {
-    hookshot.Run(func(input codex.StopInput) codex.StopOutput {
-        // IMPORTANT: Check StopHookActive to prevent infinite loops
-        if input.StopHookActive {
-            return codex.Continue()
-        }
-        return codex.Continue()
-    })
-})
-```
-
----
-
-## Configuration Example
-
-Hooks are on by default — no `~/.codex/config.toml` edit required.
-
-`~/.codex/hooks.json`:
-
-```json
-{
-  "hooks": {
-    "PreToolUse": [
-      {
-        "matcher": "Bash|apply_patch|mcp__.*",
-        "hooks": [
-          { "type": "command", "command": "/path/to/my-hooks codex-pre-tool-use" }
-        ]
-      }
-    ],
-    "PostToolUse": [
-      {
-        "matcher": "apply_patch|mcp__.*",
-        "hooks": [
-          { "type": "command", "command": "/path/to/my-hooks codex-post-tool-use" }
-        ]
-      }
-    ],
-    "UserPromptSubmit": [
-      {
-        "hooks": [
-          { "type": "command", "command": "/path/to/my-hooks codex-user-prompt-submit" }
-        ]
-      }
-    ],
-    "Stop": [
-      {
-        "hooks": [
-          { "type": "command", "command": "/path/to/my-hooks codex-stop", "timeout": 30 }
-        ]
-      }
-    ]
-  }
-}
-```
-
-`hookshot install --codex --binary /path/to/my-hooks` will generate this layout for you.
-
-> **Why `mcp__.*` is in the matcher.** Codex passes MCP tool names to PreToolUse / PostToolUse using the `mcp__server__tool` convention. Omitting the `mcp__.*` alternative would mean Codex never invokes the hook binary for MCP calls, which would silently bypass any `OnBeforeExecution` policy meant to enforce MCP allowlists.
-
-> **Why `Edit|Write` is not in the matcher.** Codex emits `Edit` and `Write` as *matcher aliases* for `apply_patch`. The canonical `tool_name` Codex sends to the hook is always `apply_patch`, so a matcher of `apply_patch` alone covers every file-edit call. `Edit` and `Write` aliases never appear as standalone tool names.
+You can also use exit code `2` with the reason written to stderr instead of
+returning the JSON output — that's what `RunE` does for you when the
+handler returns an error.
