@@ -7,6 +7,7 @@ import (
 
 	"github.com/CorridorSecurity/hookshot/cascade"
 	"github.com/CorridorSecurity/hookshot/claude"
+	"github.com/CorridorSecurity/hookshot/codex"
 	"github.com/CorridorSecurity/hookshot/cursor"
 	"github.com/CorridorSecurity/hookshot/droid"
 	"github.com/CorridorSecurity/hookshot/internal"
@@ -20,6 +21,7 @@ const (
 	PlatformCursor  Platform = "cursor"
 	PlatformDroid   Platform = "droid"
 	PlatformCascade Platform = "cascade"
+	PlatformCodex   Platform = "codex"
 )
 
 // =============================================================================
@@ -41,10 +43,11 @@ type StopContext struct {
 }
 
 // ShouldSkip returns true if the stop hook should be skipped to prevent loops.
-// For Claude Code and Droid, this checks StopHookActive. For Cursor, this checks LoopCount >= 3.
-// For Cascade, there is no loop prevention mechanism (returns false).
+// For Claude Code, Droid, and Codex, this checks StopHookActive. For Cursor,
+// this checks LoopCount >= 3. For Cascade, there is no loop prevention
+// mechanism (returns false).
 func (c StopContext) ShouldSkip() bool {
-	if c.Platform == PlatformClaude || c.Platform == PlatformDroid {
+	if c.Platform == PlatformClaude || c.Platform == PlatformDroid || c.Platform == PlatformCodex {
 		return c.StopHookActive
 	}
 	if c.Platform == PlatformCursor {
@@ -81,7 +84,7 @@ type StopHandler func(StopContext) StopDecision
 
 // OnStop registers a unified handler for stop events on all platforms.
 // It automatically registers handlers for "claude-stop", "cursor-stop",
-// "droid-stop", and "cascade-post-cascade-response".
+// "droid-stop", "cascade-post-cascade-response", and "codex-stop".
 func OnStop(handler StopHandler) {
 	Register("claude-stop", func() {
 		Run(func(input claude.StopInput) claude.StopOutput {
@@ -143,6 +146,26 @@ func OnStop(handler StopHandler) {
 			// for side effects (logging, telemetry, etc.)
 			handler(ctx)
 			return cascade.PostCascadeResponseOK()
+		})
+	})
+
+	// Codex uses the same JSON wire protocol as Claude Code but with stricter
+	// validation. Use codex.* helpers (not claude.*) so any Codex-specific
+	// quirks (e.g. rejected suppressOutput / updatedInput) are handled in
+	// one place — the codex package.
+	Register("codex-stop", func() {
+		Run(func(input codex.StopInput) codex.StopOutput {
+			ctx := StopContext{
+				Platform:       PlatformCodex,
+				SessionID:      input.SessionID,
+				Cwd:            input.Cwd,
+				StopHookActive: input.StopHookActive,
+			}
+			decision := handler(ctx)
+			if decision.Continue {
+				return codex.Continue()
+			}
+			return codex.Block(decision.Message)
 		})
 	})
 }
@@ -233,6 +256,7 @@ type ExecutionHandler func(ExecutionContext) ExecutionDecision
 //   - "droid-pre-tool-use" (filters to Bash and mcp__* tools)
 //   - "cascade-pre-run-command"
 //   - "cascade-pre-mcp-tool-use"
+//   - "codex-pre-tool-use" (filters to Bash, apply_patch, and mcp__* tools)
 func OnBeforeExecution(handler ExecutionHandler) {
 	// Claude Code PreToolUse (for Bash and MCP tools)
 	Register("claude-pre-tool-use", func() {
@@ -431,6 +455,67 @@ func OnBeforeExecution(handler ExecutionHandler) {
 			return cascade.PreMCPToolUseOutput{}, errors.New(decision.Reason)
 		})
 	})
+
+	// Codex PreToolUse (same JSON wire protocol as Claude Code, stricter
+	// validation). Codex tool names include "Bash", "apply_patch", and MCP
+	// names like "mcp__server__tool". apply_patch is classified as
+	// ExecutionTool because it represents a file edit rather than a shell
+	// command or MCP call. For apply_patch the underlying tool_input.command
+	// is parsed and exposed via ExecutionContext.Command so policies can
+	// inspect the patch text. Uses codex.* helpers so Codex quirks (no
+	// suppressOutput, no updatedInput) live in the codex package.
+	Register("codex-pre-tool-use", func() {
+		Run(func(input codex.PreToolUseInput) codex.PreToolUseOutput {
+			var execType ExecutionType
+			if input.ToolName == "Bash" {
+				execType = ExecutionShell
+			} else if len(input.ToolName) > 5 && input.ToolName[:5] == "mcp__" {
+				execType = ExecutionMCP
+			} else {
+				execType = ExecutionTool
+			}
+
+			var command string
+			if execType == ExecutionShell || input.ToolName == "apply_patch" {
+				var cmdInput struct {
+					Command string `json:"command"`
+				}
+				json.Unmarshal(input.ToolInput, &cmdInput)
+				command = cmdInput.Command
+			}
+
+			ctx := ExecutionContext{
+				Platform:      PlatformCodex,
+				Type:          execType,
+				Command:       command,
+				Cwd:           input.Cwd,
+				ToolName:      input.ToolName,
+				ToolInput:     input.ToolInput,
+				RawClaudeCode: &input,
+			}
+
+			decision := handler(ctx)
+			if decision.Allow {
+				if decision.Reason != "" {
+					return codex.Allow(decision.Reason)
+				}
+				// codex.AllowSilent is a Codex-safe no-op (emits {}) — it
+				// does NOT set suppressOutput like claude.AllowSilent,
+				// because Codex rejects that field with "PreToolUse hook
+				// returned unsupported suppressOutput".
+				return codex.AllowSilent()
+			}
+			// Codex currently parses but does not enforce permissionDecision
+			// "ask" for PreToolUse, so an Ask decision would silently fail
+			// open. Until Codex enforces it, fail closed by denying — this
+			// matches the security posture of the other platforms where
+			// Ask actually surfaces an approval prompt.
+			if decision.Ask {
+				return codex.Deny(decision.Reason)
+			}
+			return codex.Deny(decision.Reason)
+		})
+	})
 }
 
 // =============================================================================
@@ -448,8 +533,19 @@ type FileEditContext struct {
 	Platform  Platform
 	SessionID string // Claude Code: session_id, Cursor: conversation_id, Cascade: trajectory_id
 	FilePath  string
-	Edits     []FileEdit
-	Cwd       string
+	// NewFilePath is the destination path when the edit also renames the
+	// file (Codex apply_patch "*** Move to:" today; future platforms may
+	// surface their own rename semantics). It is empty for in-place edits.
+	//
+	// For Codex moves, the unified bridge invokes OnAfterFileEdit twice —
+	// once with FilePath set to the source and once with FilePath set to
+	// the destination — and populates NewFilePath on both invocations so
+	// path-based policies can never be bypassed by inspecting only
+	// FilePath. Handlers that want to detect a rename should check
+	// `ctx.NewFilePath != "" && ctx.NewFilePath != ctx.FilePath`.
+	NewFilePath string
+	Edits       []FileEdit
+	Cwd         string
 
 	// Raw input for advanced use cases
 	RawClaudeCode *claude.PostToolUseInput
@@ -494,6 +590,7 @@ type FileEditHandler func(FileEditContext) FileEditDecision
 //   - "cursor-after-file-edit"
 //   - "droid-after-file-edit" (PostToolUse for Write/Edit)
 //   - "cascade-post-write-code"
+//   - "codex-post-tool-use" (PostToolUse for Write/Edit/apply_patch)
 func OnAfterFileEdit(handler FileEditHandler) {
 	// Claude Code PostToolUse (for Write/Edit)
 	Register("claude-after-file-edit", func() {
@@ -630,6 +727,196 @@ func OnAfterFileEdit(handler FileEditHandler) {
 			return cascade.PostWriteCodeOK()
 		})
 	})
+
+	// Codex PostToolUse (same JSON protocol as Claude Code).
+	//
+	// Codex emits file edits in three shapes:
+	//   1. Write / Edit  — Claude-style tool_input with file_path + content
+	//                      or old_string/new_string. Native first-class tools.
+	//   2. apply_patch   — tool_input.command holds a unified-diff envelope
+	//                      that may touch multiple files in a single call.
+	//   3. Bash          — tool_input.command holds one of two shapes:
+	//                        a. Edits:    `apply_patch <<'PATCH' … PATCH`
+	//                                     (sometimes with an absolute path
+	//                                     to a per-session apply_patch shim)
+	//                        b. Writes:   `cat <<'EOF' > FILE … EOF` or
+	//                                     `tee FILE <<'EOF' … EOF`
+	//                      Codex routes virtually all file operations this
+	//                      way: edits via (a), greenfield writes via (b).
+	//                      Without handling BOTH cases the
+	//                      SecurityScanResults dashboard stayed empty for
+	//                      every Codex session — no afterFileEdit
+	//                      telemetry was ever emitted for "Create a file"
+	//                      prompts or for in-place edits.
+	//
+	// For (2) and (3a) we run the patch through codex.ParseApplyPatch and
+	// invoke the user's handler exactly once per file in the envelope. For
+	// (3b) codex.ParseBashRedirectWrite synthesizes a single PatchFile so
+	// the same dispatchPatch reducer drives every shape. Per-file
+	// decisions reduce as: a Block from any file wins, otherwise context
+	// strings are concatenated. The parsers are also exported as
+	// codex.ParseApplyPatch / codex.ParseApplyPatchFromBash /
+	// codex.ParseBashRedirectWrite for callers that want raw access.
+	//
+	// Configure the hook with matcher "Bash|apply_patch|mcp__.*" in
+	// hooks.json — "Edit" and "Write" matcher aliases exist but are
+	// redundant with "apply_patch", and "Bash" is required to catch the
+	// heredoc shape.
+	Register("codex-post-tool-use", func() {
+		Run(func(input codex.PostToolUseInput) codex.PostToolUseOutput {
+			// dispatchPatch invokes handler once per file in the patch
+			// envelope, then reduces per-file decisions to one
+			// PostToolUseOutput. fallbackCommand is used as the
+			// NewString of a single synthetic FileEdit when the patch
+			// could not be parsed (len(files)==0), so policies still
+			// see a Codex PostToolUse event rather than nothing.
+			dispatchPatch := func(files []codex.PatchFile, fallbackCommand string) codex.PostToolUseOutput {
+				if len(files) == 0 {
+					ctx := FileEditContext{
+						Platform:      PlatformCodex,
+						SessionID:     input.SessionID,
+						Cwd:           input.Cwd,
+						Edits:         []FileEdit{{OldString: "", NewString: fallbackCommand}},
+						RawClaudeCode: &input,
+					}
+					decision := handler(ctx)
+					if decision.Block {
+						return codex.PostToolBlock(decision.Reason)
+					}
+					if decision.Context != "" {
+						return codex.PostToolContext(decision.Context)
+					}
+					return codex.PostToolOK()
+				}
+
+				var (
+					blockReasons []string
+					contexts     []string
+				)
+				invoke := func(filePath string, f codex.PatchFile) {
+					edits := make([]FileEdit, 0, len(f.Edits))
+					for _, e := range f.Edits {
+						edits = append(edits, FileEdit{OldString: e.OldString, NewString: e.NewString})
+					}
+					ctx := FileEditContext{
+						Platform:      PlatformCodex,
+						SessionID:     input.SessionID,
+						FilePath:      filePath,
+						NewFilePath:   f.NewFilePath,
+						Edits:         edits,
+						Cwd:           input.Cwd,
+						RawClaudeCode: &input,
+					}
+					decision := handler(ctx)
+					if decision.Block {
+						blockReasons = append(blockReasons, decision.Reason)
+					} else if decision.Context != "" {
+						contexts = append(contexts, decision.Context)
+					}
+				}
+				for _, f := range files {
+					// Always invoke for the declared source path.
+					invoke(f.FilePath, f)
+					// For renames, invoke again with the destination so
+					// policies that only inspect ctx.FilePath cannot be
+					// bypassed by a "*** Move to:" pointing at a
+					// sensitive path (e.g. "../../.ssh/authorized_keys").
+					// NewFilePath is populated on both invocations so
+					// policies that want to detect the rename
+					// relationship can.
+					if f.NewFilePath != "" && f.NewFilePath != f.FilePath {
+						invoke(f.NewFilePath, f)
+					}
+				}
+				if len(blockReasons) > 0 {
+					return codex.PostToolBlock(strings.Join(blockReasons, "\n"))
+				}
+				if len(contexts) > 0 {
+					return codex.PostToolContext(strings.Join(contexts, "\n"))
+				}
+				return codex.PostToolOK()
+			}
+
+			switch input.ToolName {
+			case "Write", "Edit":
+				var toolInput struct {
+					FilePath  string `json:"file_path"`
+					Content   string `json:"content"`
+					OldString string `json:"old_string"`
+					NewString string `json:"new_string"`
+				}
+				json.Unmarshal(input.ToolInput, &toolInput)
+
+				var edits []FileEdit
+				if input.ToolName == "Edit" {
+					edits = []FileEdit{{OldString: toolInput.OldString, NewString: toolInput.NewString}}
+				} else {
+					edits = []FileEdit{{OldString: "", NewString: toolInput.Content}}
+				}
+
+				ctx := FileEditContext{
+					Platform:      PlatformCodex,
+					SessionID:     input.SessionID,
+					FilePath:      toolInput.FilePath,
+					Edits:         edits,
+					Cwd:           input.Cwd,
+					RawClaudeCode: &input,
+				}
+
+				decision := handler(ctx)
+				if decision.Block {
+					return codex.PostToolBlock(decision.Reason)
+				}
+				if decision.Context != "" {
+					return codex.PostToolContext(decision.Context)
+				}
+				return codex.PostToolOK()
+
+			case "apply_patch":
+				var applyInput struct {
+					Command string `json:"command"`
+				}
+				json.Unmarshal(input.ToolInput, &applyInput)
+				return dispatchPatch(codex.ParseApplyPatch(applyInput.Command), applyInput.Command)
+
+			case "Bash":
+				// Codex routes file operations through Bash in two
+				// distinct shapes that look superficially similar but
+				// require different parsers:
+				//
+				//   1. Edits to existing files:
+				//        apply_patch <<'PATCH' … *** End Patch … PATCH
+				//      parsed by codex.ParseApplyPatchFromBash.
+				//
+				//   2. Greenfield writes (and overwrite-style writes):
+				//        cat <<'EOF' > newfile.txt … EOF
+				//        tee newfile.txt <<'EOF' … EOF
+				//      parsed by codex.ParseBashRedirectWrite.
+				//
+				// Both produce []PatchFile suitable for the shared
+				// dispatchPatch reducer. We try apply_patch first
+				// because it's the higher-fidelity shape (per-hunk
+				// old/new) when both detectors would match, then fall
+				// back to the heredoc-write detector. Non-edit Bash
+				// commands short-circuit at the second `if !ok` check
+				// without paying for either full parse pass.
+				var bashInput struct {
+					Command string `json:"command"`
+				}
+				json.Unmarshal(input.ToolInput, &bashInput)
+				if files, ok := codex.ParseApplyPatchFromBash(bashInput.Command); ok {
+					return dispatchPatch(files, bashInput.Command)
+				}
+				if files, ok := codex.ParseBashRedirectWrite(bashInput.Command); ok {
+					return dispatchPatch(files, bashInput.Command)
+				}
+				return codex.PostToolOK()
+
+			default:
+				return codex.PostToolOK()
+			}
+		})
+	})
 }
 
 // =============================================================================
@@ -686,6 +973,7 @@ type PromptHandler func(PromptContext) PromptDecision
 //   - "cursor-before-submit-prompt"
 //   - "droid-user-prompt-submit"
 //   - "cascade-pre-user-prompt"
+//   - "codex-user-prompt-submit"
 func OnPromptSubmit(handler PromptHandler) {
 	// Claude Code UserPromptSubmit
 	Register("claude-user-prompt-submit", func() {
@@ -694,6 +982,7 @@ func OnPromptSubmit(handler PromptHandler) {
 				Platform:      PlatformClaude,
 				SessionID:     input.SessionID,
 				Prompt:        input.Prompt,
+				Cwd:           input.Cwd,
 				RawClaudeCode: &input,
 			}
 
@@ -734,6 +1023,7 @@ func OnPromptSubmit(handler PromptHandler) {
 				Platform:  PlatformDroid,
 				SessionID: input.SessionID,
 				Prompt:    input.Prompt,
+				Cwd:       input.Cwd,
 				RawDroid:  &input,
 			}
 
@@ -765,6 +1055,29 @@ func OnPromptSubmit(handler PromptHandler) {
 				return cascade.PreUserPromptOutput{}, errors.New(decision.Reason)
 			}
 			return cascade.AllowPrompt(), nil
+		})
+	})
+
+	// Codex UserPromptSubmit (same JSON wire protocol as Claude Code,
+	// stricter validation — use codex.* helpers).
+	Register("codex-user-prompt-submit", func() {
+		Run(func(input codex.UserPromptSubmitInput) codex.UserPromptSubmitOutput {
+			ctx := PromptContext{
+				Platform:      PlatformCodex,
+				SessionID:     input.SessionID,
+				Prompt:        input.Prompt,
+				Cwd:           input.Cwd,
+				RawClaudeCode: &input,
+			}
+
+			decision := handler(ctx)
+			if !decision.Allow {
+				return codex.BlockPrompt(decision.Reason)
+			}
+			if decision.Context != "" {
+				return codex.AddContext(decision.Context)
+			}
+			return codex.AllowPrompt()
 		})
 	})
 }

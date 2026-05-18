@@ -1,6 +1,6 @@
 # Unified API Reference
 
-The unified API provides cross-platform handlers that work on Claude Code, Cursor, Windsurf Cascade, and Factory Droid. Write once, run on all platforms.
+The unified API provides cross-platform handlers that work on Claude Code, Cursor, Windsurf Cascade, Factory Droid, and OpenAI Codex. Write once, run on all platforms.
 
 ## Platform Constants
 
@@ -12,6 +12,7 @@ const (
     PlatformCursor  Platform = "cursor"
     PlatformDroid   Platform = "droid"
     PlatformCascade Platform = "cascade"
+    PlatformCodex   Platform = "codex"
 )
 ```
 
@@ -19,17 +20,17 @@ const (
 
 Handles stop events when the agent is about to finish.
 
-**Registers:** `claude-stop`, `cursor-stop`, `droid-stop`, `cascade-post-cascade-response`
+**Registers:** `claude-stop`, `cursor-stop`, `droid-stop`, `cascade-post-cascade-response`, `codex-stop`
 
 ### StopContext
 
 ```go
 type StopContext struct {
     Platform  Platform
-    SessionID string // Claude/Droid: session_id, Cursor: conversation_id, Cascade: trajectory_id
-    Cwd       string // Working directory (Claude/Droid only, empty for Cursor/Cascade)
+    SessionID string // Claude/Droid/Codex: session_id, Cursor: conversation_id, Cascade: trajectory_id
+    Cwd       string // Working directory (Claude/Droid/Codex only, empty for Cursor/Cascade)
 
-    // Claude/Droid-specific
+    // Claude/Droid/Codex-specific
     StopHookActive bool // True if already continuing from a previous stop hook
 
     // Cursor-specific
@@ -42,7 +43,7 @@ type StopContext struct {
 
 ```go
 // ShouldSkip returns true if the stop hook should be skipped to prevent loops.
-// Claude/Droid: checks StopHookActive
+// Claude/Droid/Codex: checks StopHookActive
 // Cursor: checks LoopCount >= 3
 // Cascade: always returns false (no loop prevention mechanism)
 func (c StopContext) ShouldSkip() bool
@@ -86,7 +87,11 @@ hookshot.OnStop(func(ctx hookshot.StopContext) hookshot.StopDecision {
 
 Handles pre-execution events for shell commands and MCP tools.
 
-**Registers:** `claude-pre-tool-use`, `cursor-before-shell`, `cursor-before-mcp`, `droid-pre-tool-use`, `cascade-pre-run-command`, `cascade-pre-mcp-tool-use`
+**Registers:** `claude-pre-tool-use`, `cursor-before-shell`, `cursor-before-mcp`, `droid-pre-tool-use`, `cascade-pre-run-command`, `cascade-pre-mcp-tool-use`, `codex-pre-tool-use`
+
+For Codex, `apply_patch` is classified as `ExecutionTool` (not `ExecutionShell` or `ExecutionMCP`); use `ctx.ToolName == "apply_patch"` to detect it. The patch text is exposed via `ctx.Command` so policies can inspect it without re-parsing `ToolInput`.
+
+Codex does not currently enforce `permissionDecision: "ask"`. To avoid a silent fail-open, the unified bridge rewrites `AskExecution(...)` decisions to a `Deny` on Codex; on every other platform `Ask` still surfaces an approval prompt as before.
 
 ### ExecutionType
 
@@ -107,9 +112,9 @@ type ExecutionContext struct {
     Platform Platform
     Type     ExecutionType
 
-    // For shell execution (Cursor beforeShellExecution, Claude Code Bash tool)
+    // For shell execution (Cursor beforeShellExecution, Claude Code/Codex Bash tool)
     // Also used for local MCP servers on Cursor (command-based MCP servers)
-    // NOTE: Only populated for Cursor and Cascade, not Claude Code or Droid
+    // NOTE: For Claude Code, Droid, and Codex, Command is parsed from tool_input.command for Bash.
     Command string
     Cwd     string // Working directory
 
@@ -119,6 +124,8 @@ type ExecutionContext struct {
     ServerURL string          // MCP server URL (Cursor/Cascade only, for URL-based servers)
 
     // Raw access
+    // For Codex, the raw input is shared with Claude Code (RawClaudeCode) because
+    // Codex uses the same JSON wire format.
     RawClaudeCode *claude.PreToolUseInput
     RawCursor     any // *cursor.BeforeShellExecutionInput or *cursor.BeforeMCPExecutionInput
     RawDroid      *droid.PreToolUseInput
@@ -178,7 +185,15 @@ hookshot.OnBeforeExecution(func(ctx hookshot.ExecutionContext) hookshot.Executio
 
 Handles post-file-edit events.
 
-**Registers:** `claude-after-file-edit`, `cursor-after-file-edit`, `droid-after-file-edit`, `cascade-post-write-code`
+**Registers:** `claude-after-file-edit`, `cursor-after-file-edit`, `droid-after-file-edit`, `cascade-post-write-code`, `codex-post-tool-use`
+
+For Codex, the underlying PostToolUse handler must match `Bash` in addition to `apply_patch`: Codex 0.130.0+ routes greenfield writes through `cat <<'EOF' > FILE` and edits through `apply_patch <<'PATCH'` heredocs — both shapes ride a `tool_name="Bash"` PostToolUse, parsed by `codex.ParseBashRedirectWrite` and `codex.ParseApplyPatchFromBash` respectively. Configure the hook with `matcher: "Bash|apply_patch|mcp__.*"` in `~/.codex/hooks.json`.
+
+For Codex `apply_patch`, the unified bridge parses the unified-diff envelope in `tool_input.command` and invokes your handler **once per file** in the patch, with `FilePath` set to the file declared in the `*** Add/Update/Delete File:` header and `Edits` populated from each hunk. If any of those invocations returns `FileEditBlock`, the reasons are concatenated and emitted as a single `PostToolBlock`.
+
+For renames (`*** Update File: <src>` + `*** Move to: <dst>`) the handler is invoked **twice** — once with `FilePath` set to the source and once with `FilePath` set to the destination — and `NewFilePath` is populated on both invocations. This means a FilePath-only allowlist that permits the benign source still receives a separate call for the destination so it can deny something like `../../.ssh/authorized_keys`. Handlers that want to detect the rename relationship should check `ctx.NewFilePath != "" && ctx.NewFilePath != ctx.FilePath`.
+
+The same parser is exported as `codex.ParseApplyPatch` for callers that want to parse a patch envelope themselves.
 
 ### FileEdit
 
@@ -193,11 +208,12 @@ type FileEdit struct {
 
 ```go
 type FileEditContext struct {
-    Platform  Platform
-    SessionID string // Claude/Droid: session_id, Cursor: conversation_id, Cascade: trajectory_id
-    FilePath  string
-    Edits     []FileEdit
-    Cwd       string
+    Platform    Platform
+    SessionID   string // Claude/Droid: session_id, Cursor: conversation_id, Cascade: trajectory_id
+    FilePath    string
+    NewFilePath string // Destination path for rename operations (Codex apply_patch "*** Move to:"); empty otherwise.
+    Edits       []FileEdit
+    Cwd         string
 
     // Raw access
     RawClaudeCode *claude.PostToolUseInput
@@ -251,7 +267,7 @@ hookshot.OnAfterFileEdit(func(ctx hookshot.FileEditContext) hookshot.FileEditDec
 
 Handles prompt submission events.
 
-**Registers:** `claude-user-prompt-submit`, `cursor-before-submit-prompt`, `droid-user-prompt-submit`, `cascade-pre-user-prompt`
+**Registers:** `claude-user-prompt-submit`, `cursor-before-submit-prompt`, `droid-user-prompt-submit`, `cascade-pre-user-prompt`, `codex-user-prompt-submit`
 
 ### PromptContext
 

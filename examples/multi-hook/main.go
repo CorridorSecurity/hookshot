@@ -53,6 +53,18 @@
 //	    "UserPromptSubmit": [{ "command": "/path/to/my-hooks droid-user-prompt-submit" }]
 //	  }
 //	}
+//
+// Configure in OpenAI Codex (~/.codex/hooks.json; hooks are enabled by
+// default in current Codex releases):
+//
+//	{
+//	  "hooks": {
+//	    "Stop": [{ "hooks": [{ "type": "command", "command": "/path/to/my-hooks codex-stop" }] }],
+//	    "PreToolUse": [{ "matcher": "Bash|apply_patch|mcp__.*", "hooks": [{ "type": "command", "command": "/path/to/my-hooks codex-pre-tool-use" }] }],
+//	    "PostToolUse": [{ "matcher": "Bash|apply_patch|mcp__.*", "hooks": [{ "type": "command", "command": "/path/to/my-hooks codex-post-tool-use" }] }],
+//	    "UserPromptSubmit": [{ "hooks": [{ "type": "command", "command": "/path/to/my-hooks codex-user-prompt-submit" }] }]
+//	  }
+//	}
 package main
 
 import (
@@ -68,8 +80,8 @@ import (
 func main() {
 	// ==========================================================================
 	// UNIFIED HANDLERS
-	// Write once, works on Claude Code, Cursor, Windsurf Cascade, and
-	// Factory Droid automatically.
+	// Write once, works on Claude Code, Cursor, Windsurf Cascade,
+	// Factory Droid, and OpenAI Codex automatically.
 	// ==========================================================================
 
 	hookshot.OnStop(handleStop)

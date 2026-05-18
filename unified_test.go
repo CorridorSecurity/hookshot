@@ -262,6 +262,25 @@ func TestPlatformConstants(t *testing.T) {
 	if PlatformCursor != "cursor" {
 		t.Errorf("PlatformCursor = %q, want %q", PlatformCursor, "cursor")
 	}
+	if PlatformDroid != "droid" {
+		t.Errorf("PlatformDroid = %q, want %q", PlatformDroid, "droid")
+	}
+	if PlatformCascade != "cascade" {
+		t.Errorf("PlatformCascade = %q, want %q", PlatformCascade, "cascade")
+	}
+	if PlatformCodex != "codex" {
+		t.Errorf("PlatformCodex = %q, want %q", PlatformCodex, "codex")
+	}
+}
+
+func TestStopContext_ShouldSkip_Codex(t *testing.T) {
+	// Codex uses StopHookActive like Claude Code and Droid.
+	if !(StopContext{Platform: PlatformCodex, StopHookActive: true}).ShouldSkip() {
+		t.Error("Codex StopHookActive=true should skip")
+	}
+	if (StopContext{Platform: PlatformCodex, StopHookActive: false}).ShouldSkip() {
+		t.Error("Codex StopHookActive=false should not skip")
+	}
 }
 
 // =============================================================================
@@ -307,6 +326,7 @@ func TestOnBeforeExecution_RegistersAllHandlers(t *testing.T) {
 		"droid-pre-tool-use",
 		"cascade-pre-run-command",
 		"cascade-pre-mcp-tool-use",
+		"codex-pre-tool-use",
 	}
 
 	for _, name := range expectedHandlers {
@@ -329,6 +349,7 @@ func TestOnPromptSubmit_RegistersAllHandlers(t *testing.T) {
 		"cursor-before-submit-prompt",
 		"droid-user-prompt-submit",
 		"cascade-pre-user-prompt",
+		"codex-user-prompt-submit",
 	}
 
 	for _, name := range expectedHandlers {
@@ -351,6 +372,7 @@ func TestOnStop_RegistersAllHandlers(t *testing.T) {
 		"cursor-stop",
 		"droid-stop",
 		"cascade-post-cascade-response",
+		"codex-stop",
 	}
 
 	for _, name := range expectedHandlers {
@@ -373,6 +395,7 @@ func TestOnAfterFileEdit_RegistersAllHandlers(t *testing.T) {
 		"cursor-after-file-edit",
 		"droid-after-file-edit",
 		"cascade-post-write-code",
+		"codex-post-tool-use",
 	}
 
 	for _, name := range expectedHandlers {
@@ -773,6 +796,575 @@ func TestOnPromptSubmit_CursorPopulatesCwd(t *testing.T) {
 
 	if captured.Cwd != "/root/from/ws" {
 		t.Errorf("Cwd = %q, want %q", captured.Cwd, "/root/from/ws")
+	}
+}
+
+// =============================================================================
+// Codex-specific behavior tests
+// =============================================================================
+
+func TestCodexPreToolUse_AskFailsClosed(t *testing.T) {
+	// Codex currently parses but does not enforce permissionDecision "ask",
+	// so the unified Codex pre-tool-use bridge must convert an Ask decision
+	// into a Deny so policies still fail closed.
+	ClearHandlers()
+	defer ClearHandlers()
+
+	OnBeforeExecution(func(ctx ExecutionContext) ExecutionDecision {
+		return AskExecution("please confirm")
+	})
+
+	// Capture stdout to assert on the emitted JSON.
+	stdinR, stdinW, _ := os.Pipe()
+	stdinW.Write([]byte(`{"session_id":"s","tool_name":"Bash","tool_input":{"command":"rm -rf /"},"cwd":"/tmp"}`))
+	stdinW.Close()
+	stdoutR, stdoutW, _ := os.Pipe()
+	origStdin, origStdout := os.Stdin, os.Stdout
+	os.Stdin, os.Stdout = stdinR, stdoutW
+	defer func() {
+		stdoutW.Close()
+		os.Stdin, os.Stdout = origStdin, origStdout
+	}()
+
+	handlers["codex-pre-tool-use"]()
+	stdoutW.Close()
+
+	var buf bytes.Buffer
+	buf.ReadFrom(stdoutR)
+	got := buf.String()
+	if !strings.Contains(got, `"permissionDecision":"deny"`) {
+		t.Errorf("Codex Ask decision should emit deny, got %q", got)
+	}
+	if strings.Contains(got, `"permissionDecision":"ask"`) {
+		t.Errorf("Codex Ask decision should NOT emit ask, got %q", got)
+	}
+}
+
+func TestCodexPreToolUse_AllowDoesNotEmitSuppressOutput(t *testing.T) {
+	// Codex rejects suppressOutput with "PreToolUse hook returned unsupported
+	// suppressOutput", so the Codex pre-tool-use bridge must NOT use
+	// claude.AllowSilent (which sets suppressOutput: true) when translating
+	// an Allow decision with no reason. PassThrough (empty {}) is the right
+	// shape — Codex treats an empty output as success.
+	ClearHandlers()
+	defer ClearHandlers()
+
+	OnBeforeExecution(func(ctx ExecutionContext) ExecutionDecision {
+		return AllowExecution()
+	})
+
+	stdinR, stdinW, _ := os.Pipe()
+	stdinW.Write([]byte(`{"session_id":"s","tool_name":"Bash","tool_input":{"command":"echo hi"},"cwd":"/tmp"}`))
+	stdinW.Close()
+	stdoutR, stdoutW, _ := os.Pipe()
+	origStdin, origStdout := os.Stdin, os.Stdout
+	os.Stdin, os.Stdout = stdinR, stdoutW
+	defer func() {
+		stdoutW.Close()
+		os.Stdin, os.Stdout = origStdin, origStdout
+	}()
+
+	handlers["codex-pre-tool-use"]()
+	stdoutW.Close()
+
+	var buf bytes.Buffer
+	buf.ReadFrom(stdoutR)
+	got := buf.String()
+	if strings.Contains(got, "suppressOutput") {
+		t.Errorf("Codex Allow decision must not emit suppressOutput, got %q", got)
+	}
+}
+
+func TestCodexPreToolUse_ApplyPatchPopulatesCommand(t *testing.T) {
+	// For apply_patch, the unified handler should pull tool_input.command
+	// out as ExecutionContext.Command so policies can inspect the patch.
+	ClearHandlers()
+	defer ClearHandlers()
+
+	var captured ExecutionContext
+	OnBeforeExecution(func(ctx ExecutionContext) ExecutionDecision {
+		captured = ctx
+		return AllowExecution()
+	})
+
+	stdin := `{"session_id":"s","tool_name":"apply_patch","tool_input":{"command":"*** Begin Patch\n*** Add File: foo.txt\n+hi\n*** End Patch"},"cwd":"/tmp"}`
+	runHandlerWithStdin(t, "codex-pre-tool-use", stdin)
+
+	if captured.Platform != PlatformCodex {
+		t.Errorf("Platform = %q, want %q", captured.Platform, PlatformCodex)
+	}
+	if captured.Type != ExecutionTool {
+		t.Errorf("Type = %q, want %q (apply_patch is a tool, not shell/mcp)", captured.Type, ExecutionTool)
+	}
+	if captured.ToolName != "apply_patch" {
+		t.Errorf("ToolName = %q, want %q", captured.ToolName, "apply_patch")
+	}
+	if !strings.Contains(captured.Command, "*** Add File: foo.txt") {
+		t.Errorf("Command should contain the patch text, got %q", captured.Command)
+	}
+}
+
+func TestCodexPreToolUse_MCPClassifiedAsMCP(t *testing.T) {
+	// Verifies that MCP tools reaching the codex-pre-tool-use handler are
+	// classified as ExecutionMCP. (Reaching the handler at all also
+	// requires the installer to include mcp__.* in the matcher; see
+	// TestCodexInstaller_MatcherIncludesMCP for that side.)
+	ClearHandlers()
+	defer ClearHandlers()
+
+	var captured ExecutionContext
+	OnBeforeExecution(func(ctx ExecutionContext) ExecutionDecision {
+		captured = ctx
+		return AllowExecution()
+	})
+
+	stdin := `{"session_id":"s","tool_name":"mcp__net__fetch","tool_input":{"url":"http://example.com"},"cwd":"/tmp"}`
+	runHandlerWithStdin(t, "codex-pre-tool-use", stdin)
+
+	if !captured.IsMCP() {
+		t.Errorf("Type = %q, want %q for MCP tool", captured.Type, ExecutionMCP)
+	}
+	if captured.ToolName != "mcp__net__fetch" {
+		t.Errorf("ToolName = %q, want %q", captured.ToolName, "mcp__net__fetch")
+	}
+}
+
+func TestCodexPostToolUse_ApplyPatchParsesFilesAndEdits(t *testing.T) {
+	ClearHandlers()
+	defer ClearHandlers()
+
+	var got []FileEditContext
+	OnAfterFileEdit(func(ctx FileEditContext) FileEditDecision {
+		got = append(got, ctx)
+		return FileEditOK()
+	})
+
+	// One add, one update, one delete in a single apply_patch call.
+	patch := "*** Begin Patch\\n" +
+		"*** Add File: secrets/api_key.txt\\n" +
+		"+sk-deadbeef\\n" +
+		"*** Update File: src/auth.go\\n" +
+		"@@\\n" +
+		"-old\\n" +
+		"+new\\n" +
+		"*** Delete File: stale.env\\n" +
+		"*** End Patch"
+	stdin := `{"session_id":"s","tool_name":"apply_patch","tool_input":{"command":"` + patch + `"},"cwd":"/repo"}`
+	runHandlerWithStdin(t, "codex-post-tool-use", stdin)
+
+	if len(got) != 3 {
+		t.Fatalf("handler invocations = %d, want 3 (one per file in patch); got=%+v", len(got), got)
+	}
+	if got[0].FilePath != "secrets/api_key.txt" {
+		t.Errorf("got[0].FilePath = %q, want %q", got[0].FilePath, "secrets/api_key.txt")
+	}
+	if len(got[0].Edits) != 1 || got[0].Edits[0].NewString != "sk-deadbeef" {
+		t.Errorf("got[0].Edits = %+v, want [{OldString:\"\", NewString:\"sk-deadbeef\"}]", got[0].Edits)
+	}
+	if got[1].FilePath != "src/auth.go" {
+		t.Errorf("got[1].FilePath = %q, want %q", got[1].FilePath, "src/auth.go")
+	}
+	wantEdit := FileEdit{OldString: "old", NewString: "new"}
+	if len(got[1].Edits) != 1 || got[1].Edits[0] != wantEdit {
+		t.Errorf("got[1].Edits = %+v, want [%+v]", got[1].Edits, wantEdit)
+	}
+	// Delete sections carry no per-edit content; we just verify the file
+	// path made it through so path-based policies can still react.
+	if got[2].FilePath != "stale.env" {
+		t.Errorf("got[2].FilePath = %q, want %q", got[2].FilePath, "stale.env")
+	}
+	if len(got[2].Edits) != 0 {
+		t.Errorf("got[2].Edits = %+v, want empty for delete", got[2].Edits)
+	}
+	for _, c := range got {
+		if c.Platform != PlatformCodex {
+			t.Errorf("Platform = %q, want %q", c.Platform, PlatformCodex)
+		}
+		if c.Cwd != "/repo" {
+			t.Errorf("Cwd = %q, want %q", c.Cwd, "/repo")
+		}
+	}
+}
+
+func TestCodexPostToolUse_ApplyPatchMoveToInvokesHandlerForDestination(t *testing.T) {
+	// An apply_patch with a "*** Move to:" directive must surface the
+	// destination path to the handler. Without this, a patch like
+	// "*** Update File: app/config.go\n*** Move to: ../../.ssh/authorized_keys"
+	// would slip past a path-based policy that only inspects
+	// ctx.FilePath. The bridge invokes the handler twice for a rename so
+	// existing FilePath-only policies catch the destination.
+	ClearHandlers()
+	defer ClearHandlers()
+
+	var seen []FileEditContext
+	OnAfterFileEdit(func(ctx FileEditContext) FileEditDecision {
+		seen = append(seen, ctx)
+		return FileEditOK()
+	})
+
+	patch := "*** Begin Patch\\n" +
+		"*** Update File: app/config.go\\n" +
+		"*** Move to: ../../.ssh/authorized_keys\\n" +
+		"@@\\n" +
+		"-old\\n" +
+		"+attacker-controlled\\n" +
+		"*** End Patch"
+	stdin := `{"session_id":"s","tool_name":"apply_patch","tool_input":{"command":"` + patch + `"},"cwd":"/repo"}`
+	runHandlerWithStdin(t, "codex-post-tool-use", stdin)
+
+	if len(seen) != 2 {
+		t.Fatalf("handler invocations = %d, want 2 (source + destination); got %+v", len(seen), seen)
+	}
+	// Both invocations must expose the destination via NewFilePath so a
+	// policy can detect that a rename is happening.
+	for _, c := range seen {
+		if c.NewFilePath != "../../.ssh/authorized_keys" {
+			t.Errorf("NewFilePath = %q, want %q", c.NewFilePath, "../../.ssh/authorized_keys")
+		}
+	}
+	// First call: source path. Second call: destination path. A
+	// FilePath-only allowlist that permits "app/config.go" must still see
+	// "../../.ssh/authorized_keys" so it can deny it.
+	if seen[0].FilePath != "app/config.go" {
+		t.Errorf("seen[0].FilePath = %q, want %q", seen[0].FilePath, "app/config.go")
+	}
+	if seen[1].FilePath != "../../.ssh/authorized_keys" {
+		t.Errorf("seen[1].FilePath = %q, want %q", seen[1].FilePath, "../../.ssh/authorized_keys")
+	}
+}
+
+func TestCodexPostToolUse_ApplyPatchMoveToBlockOnDestinationPropagates(t *testing.T) {
+	// A FilePath-only policy that blocks ".ssh/authorized_keys" must
+	// surface as a PostToolBlock even when the source path was benign.
+	ClearHandlers()
+	defer ClearHandlers()
+
+	OnAfterFileEdit(func(ctx FileEditContext) FileEditDecision {
+		if strings.Contains(ctx.FilePath, ".ssh/authorized_keys") {
+			return FileEditBlock("destination is a sensitive path")
+		}
+		return FileEditOK()
+	})
+
+	patch := "*** Begin Patch\\n" +
+		"*** Update File: app/config.go\\n" +
+		"*** Move to: ../../.ssh/authorized_keys\\n" +
+		"@@\\n" +
+		"-old\\n" +
+		"+attacker-controlled\\n" +
+		"*** End Patch"
+	stdin := `{"session_id":"s","tool_name":"apply_patch","tool_input":{"command":"` + patch + `"},"cwd":"/repo"}`
+
+	stdinR, stdinW, _ := os.Pipe()
+	stdinW.Write([]byte(stdin))
+	stdinW.Close()
+	stdoutR, stdoutW, _ := os.Pipe()
+	origStdin, origStdout := os.Stdin, os.Stdout
+	os.Stdin, os.Stdout = stdinR, stdoutW
+	defer func() {
+		stdoutW.Close()
+		os.Stdin, os.Stdout = origStdin, origStdout
+	}()
+
+	handlers["codex-post-tool-use"]()
+	stdoutW.Close()
+
+	var buf bytes.Buffer
+	buf.ReadFrom(stdoutR)
+	out := buf.String()
+	if !strings.Contains(out, `"decision":"block"`) {
+		t.Errorf("expected PostToolBlock JSON output, got %q", out)
+	}
+	if !strings.Contains(out, "destination is a sensitive path") {
+		t.Errorf("expected block reason to be present, got %q", out)
+	}
+}
+
+func TestCodexPostToolUse_ApplyPatchBlockPropagates(t *testing.T) {
+	// If any file in a multi-file apply_patch is blocked, the unified
+	// handler must emit a PostToolBlock so Codex sees feedback rather than
+	// silently passing through.
+	ClearHandlers()
+	defer ClearHandlers()
+
+	OnAfterFileEdit(func(ctx FileEditContext) FileEditDecision {
+		if strings.Contains(ctx.FilePath, "secrets") {
+			return FileEditBlock("contains secrets")
+		}
+		return FileEditOK()
+	})
+
+	patch := "*** Begin Patch\\n" +
+		"*** Add File: secrets/key.txt\\n" +
+		"+sk-deadbeef\\n" +
+		"*** Update File: src/auth.go\\n" +
+		"@@\\n" +
+		"-x\\n" +
+		"+y\\n" +
+		"*** End Patch"
+	stdin := `{"session_id":"s","tool_name":"apply_patch","tool_input":{"command":"` + patch + `"},"cwd":"/repo"}`
+
+	stdinR, stdinW, _ := os.Pipe()
+	stdinW.Write([]byte(stdin))
+	stdinW.Close()
+	stdoutR, stdoutW, _ := os.Pipe()
+	origStdin, origStdout := os.Stdin, os.Stdout
+	os.Stdin, os.Stdout = stdinR, stdoutW
+	defer func() {
+		stdoutW.Close()
+		os.Stdin, os.Stdout = origStdin, origStdout
+	}()
+
+	handlers["codex-post-tool-use"]()
+	stdoutW.Close()
+
+	var buf bytes.Buffer
+	buf.ReadFrom(stdoutR)
+	out := buf.String()
+	if !strings.Contains(out, `"decision":"block"`) {
+		t.Errorf("expected PostToolBlock JSON output, got %q", out)
+	}
+	if !strings.Contains(out, "contains secrets") {
+		t.Errorf("expected block reason to be present, got %q", out)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Codex Bash → apply_patch heredoc bridging
+// ---------------------------------------------------------------------------
+// These tests cover the case where Codex routes a file edit through a Bash
+// `apply_patch <<'PATCH' … PATCH` invocation instead of a first-class
+// tool_name="apply_patch" call. The unified bridge must detect that shape
+// and dispatch through OnAfterFileEdit identically to the native path —
+// otherwise SecurityScanResults never get populated for Codex sessions and
+// the analytics dashboard shows zero stop-hook security checks.
+
+func TestCodexPostToolUse_BashApplyPatchHeredocDispatches(t *testing.T) {
+	ClearHandlers()
+	defer ClearHandlers()
+
+	var got []FileEditContext
+	OnAfterFileEdit(func(ctx FileEditContext) FileEditDecision {
+		got = append(got, ctx)
+		return FileEditOK()
+	})
+
+	// Multi-file patch wrapped in a real-shape Codex Bash heredoc. The \\n
+	// sequences become literal newlines after JSON decoding so the parser
+	// sees the same line breaks Codex would emit.
+	cmd := "apply_patch <<'PATCH'\\n" +
+		"*** Begin Patch\\n" +
+		"*** Add File: secrets/api_key.txt\\n" +
+		"+sk-deadbeef\\n" +
+		"*** Update File: src/auth.go\\n" +
+		"@@\\n" +
+		"-old\\n" +
+		"+new\\n" +
+		"*** End Patch\\n" +
+		"PATCH"
+	stdin := `{"session_id":"s","tool_name":"Bash","tool_input":{"command":"` + cmd + `"},"cwd":"/repo"}`
+	runHandlerWithStdin(t, "codex-post-tool-use", stdin)
+
+	if len(got) != 2 {
+		t.Fatalf("handler invocations = %d, want 2 (one per file in patch); got=%+v", len(got), got)
+	}
+	if got[0].FilePath != "secrets/api_key.txt" {
+		t.Errorf("got[0].FilePath = %q, want %q", got[0].FilePath, "secrets/api_key.txt")
+	}
+	if got[1].FilePath != "src/auth.go" {
+		t.Errorf("got[1].FilePath = %q, want %q", got[1].FilePath, "src/auth.go")
+	}
+	for _, c := range got {
+		if c.Platform != PlatformCodex {
+			t.Errorf("Platform = %q, want %q", c.Platform, PlatformCodex)
+		}
+		if c.Cwd != "/repo" {
+			t.Errorf("Cwd = %q, want %q", c.Cwd, "/repo")
+		}
+		if c.SessionID != "s" {
+			t.Errorf("SessionID = %q, want %q", c.SessionID, "s")
+		}
+	}
+	wantEdit := FileEdit{OldString: "old", NewString: "new"}
+	if len(got[1].Edits) != 1 || got[1].Edits[0] != wantEdit {
+		t.Errorf("got[1].Edits = %+v, want [%+v]", got[1].Edits, wantEdit)
+	}
+}
+
+func TestCodexPostToolUse_BashApplyPatchAbsolutePathBinaryDispatches(t *testing.T) {
+	// Codex sometimes invokes a per-session apply_patch shim by absolute
+	// path (observed in hook_events.data for real sessions). The bridge
+	// must still recognize this as an apply_patch invocation.
+	ClearHandlers()
+	defer ClearHandlers()
+
+	var got []FileEditContext
+	OnAfterFileEdit(func(ctx FileEditContext) FileEditDecision {
+		got = append(got, ctx)
+		return FileEditOK()
+	})
+
+	cmd := "/Users/me/.codex/tmp/arg0/codex-arg0IuQk4E/apply_patch <<'PATCH'\\n" +
+		"*** Begin Patch\\n" +
+		"*** Add File: foo.txt\\n" +
+		"+hi\\n" +
+		"*** End Patch\\n" +
+		"PATCH"
+	stdin := `{"session_id":"s","tool_name":"Bash","tool_input":{"command":"` + cmd + `"},"cwd":"/repo"}`
+	runHandlerWithStdin(t, "codex-post-tool-use", stdin)
+
+	if len(got) != 1 || got[0].FilePath != "foo.txt" {
+		t.Fatalf("got = %+v, want one invocation with FilePath=foo.txt", got)
+	}
+}
+
+func TestCodexPostToolUse_BashNonApplyPatchCommandSkipped(t *testing.T) {
+	// A normal Bash command must not trigger the file-edit handler.
+	// Otherwise every `ls`, `git status`, `cat`, etc. emitted by Codex
+	// would be misclassified as a file edit, flooding the security
+	// scanner with garbage events.
+	ClearHandlers()
+	defer ClearHandlers()
+
+	invoked := 0
+	OnAfterFileEdit(func(FileEditContext) FileEditDecision {
+		invoked++
+		return FileEditOK()
+	})
+
+	stdin := `{"session_id":"s","tool_name":"Bash","tool_input":{"command":"ls -la /tmp"},"cwd":"/repo"}`
+	runHandlerWithStdin(t, "codex-post-tool-use", stdin)
+
+	if invoked != 0 {
+		t.Errorf("handler invoked %d times for plain Bash command, want 0", invoked)
+	}
+}
+
+func TestCodexPostToolUse_BashCatHeredocWriteDispatches(t *testing.T) {
+	// Codex 0.130.0+ routes greenfield writes through a plain Bash
+	// `cat <<'EOF' > FILE … EOF` heredoc rather than apply_patch or any
+	// Write/Edit tool alias. Without this dispatch path, no afterFileEdit
+	// fires for "Create a file …" prompts and the security scanner
+	// never sees the new file — the exact regression that motivated
+	// ParseBashRedirectWrite. This test pins the wiring end-to-end.
+	ClearHandlers()
+	defer ClearHandlers()
+
+	var got []FileEditContext
+	OnAfterFileEdit(func(ctx FileEditContext) FileEditDecision {
+		got = append(got, ctx)
+		return FileEditOK()
+	})
+
+	cmd := "cat <<'EOF' > greet.txt\\nhello world\\nEOF"
+	stdin := `{"session_id":"s","tool_name":"Bash","tool_input":{"command":"` + cmd + `"},"cwd":"/repo"}`
+	runHandlerWithStdin(t, "codex-post-tool-use", stdin)
+
+	if len(got) != 1 {
+		t.Fatalf("handler invocations = %d, want 1; got=%+v", len(got), got)
+	}
+	if got[0].FilePath != "greet.txt" {
+		t.Errorf("FilePath = %q, want %q", got[0].FilePath, "greet.txt")
+	}
+	if got[0].Platform != PlatformCodex {
+		t.Errorf("Platform = %q, want %q", got[0].Platform, PlatformCodex)
+	}
+	if got[0].Cwd != "/repo" {
+		t.Errorf("Cwd = %q, want %q", got[0].Cwd, "/repo")
+	}
+	wantEdit := FileEdit{OldString: "", NewString: "hello world"}
+	if len(got[0].Edits) != 1 || got[0].Edits[0] != wantEdit {
+		t.Errorf("Edits = %+v, want [%+v]", got[0].Edits, wantEdit)
+	}
+}
+
+func TestCodexPostToolUse_BashCatHeredocBlockPropagates(t *testing.T) {
+	// Blocking decisions on cat-heredoc writes must surface as
+	// PostToolBlock JSON, identical to the apply_patch path. This is
+	// what lets policies like "no .env files" actually stop Codex
+	// from creating sensitive files via greenfield writes.
+	ClearHandlers()
+	defer ClearHandlers()
+
+	OnAfterFileEdit(func(ctx FileEditContext) FileEditDecision {
+		if strings.HasSuffix(ctx.FilePath, ".env") {
+			return FileEditBlock("no env files")
+		}
+		return FileEditOK()
+	})
+
+	cmd := "cat <<'EOF' > .env\\nSECRET=abc\\nEOF"
+	stdin := `{"session_id":"s","tool_name":"Bash","tool_input":{"command":"` + cmd + `"},"cwd":"/repo"}`
+
+	stdinR, stdinW, _ := os.Pipe()
+	stdinW.Write([]byte(stdin))
+	stdinW.Close()
+	stdoutR, stdoutW, _ := os.Pipe()
+	origStdin, origStdout := os.Stdin, os.Stdout
+	os.Stdin, os.Stdout = stdinR, stdoutW
+	defer func() {
+		stdoutW.Close()
+		os.Stdin, os.Stdout = origStdin, origStdout
+	}()
+
+	handlers["codex-post-tool-use"]()
+	stdoutW.Close()
+
+	var buf bytes.Buffer
+	buf.ReadFrom(stdoutR)
+	out := buf.String()
+	if !strings.Contains(out, `"decision":"block"`) {
+		t.Errorf("expected PostToolBlock JSON output, got %q", out)
+	}
+	if !strings.Contains(out, "no env files") {
+		t.Errorf("expected block reason in output, got %q", out)
+	}
+}
+
+func TestCodexPostToolUse_BashApplyPatchBlockPropagates(t *testing.T) {
+	// A blocking decision from the user's handler on a Bash-heredoc
+	// apply_patch must emit PostToolBlock so Codex surfaces the feedback,
+	// identically to the native apply_patch path.
+	ClearHandlers()
+	defer ClearHandlers()
+
+	OnAfterFileEdit(func(ctx FileEditContext) FileEditDecision {
+		if strings.Contains(ctx.FilePath, "secrets") {
+			return FileEditBlock("contains secrets")
+		}
+		return FileEditOK()
+	})
+
+	cmd := "apply_patch <<'PATCH'\\n" +
+		"*** Begin Patch\\n" +
+		"*** Add File: secrets/key.txt\\n" +
+		"+sk-deadbeef\\n" +
+		"*** End Patch\\n" +
+		"PATCH"
+	stdin := `{"session_id":"s","tool_name":"Bash","tool_input":{"command":"` + cmd + `"},"cwd":"/repo"}`
+
+	stdinR, stdinW, _ := os.Pipe()
+	stdinW.Write([]byte(stdin))
+	stdinW.Close()
+	stdoutR, stdoutW, _ := os.Pipe()
+	origStdin, origStdout := os.Stdin, os.Stdout
+	os.Stdin, os.Stdout = stdinR, stdoutW
+	defer func() {
+		stdoutW.Close()
+		os.Stdin, os.Stdout = origStdin, origStdout
+	}()
+
+	handlers["codex-post-tool-use"]()
+	stdoutW.Close()
+
+	var buf bytes.Buffer
+	buf.ReadFrom(stdoutR)
+	out := buf.String()
+	if !strings.Contains(out, `"decision":"block"`) {
+		t.Errorf("expected PostToolBlock JSON output, got %q", out)
+	}
+	if !strings.Contains(out, "contains secrets") {
+		t.Errorf("expected block reason to be present, got %q", out)
 	}
 }
 

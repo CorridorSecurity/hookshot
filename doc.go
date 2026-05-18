@@ -1,5 +1,5 @@
 // Package hookshot provides a framework for building hooks for AI coding agents
-// like Cursor and Claude Code.
+// like Cursor, Claude Code, Windsurf Cascade, Factory Droid, and OpenAI Codex.
 //
 // # Quick Start
 //
@@ -112,6 +112,9 @@
 //   - hookshot (this package): Core Run/Register/RunCommand functions
 //   - hookshot/claude: Types and helpers for Claude Code hooks
 //   - hookshot/cursor: Types and helpers for Cursor hooks
+//   - hookshot/cascade: Types and helpers for Windsurf Cascade hooks
+//   - hookshot/droid: Types and helpers for Factory Droid hooks
+//   - hookshot/codex: Types and helpers for OpenAI Codex hooks
 //   - hookshot/build: Cross-platform build tool
 //   - hookshot/internal: Internal JSON I/O (not for external use)
 //

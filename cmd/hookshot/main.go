@@ -15,6 +15,7 @@
 //
 //	hookshot install --binary ./my-hooks
 //	hookshot install --binary ./my-hooks --claude --cursor
+//	hookshot install --binary ./my-hooks --codex
 package main
 
 import (
@@ -56,7 +57,7 @@ Usage:
 
 Commands:
   build     Build hooks binary for one or more platforms
-  install   Install hooks to AI coding agent config files (Claude Code, Cursor, Droid, Cascade)
+  install   Install hooks to AI coding agent config files (Claude Code, Cursor, Droid, Cascade, Codex)
 
 Run 'hookshot <command> -h' for command-specific help.`)
 }
@@ -199,11 +200,12 @@ func runInstall(args []string) {
 	fs := flag.NewFlagSet("install", flag.ExitOnError)
 
 	var (
-		binaryPath    string
-		claudeFlag    bool
-		cursorFlag    bool
-		droidFlag     bool
-		cascadeFlag   bool
+		binaryPath  string
+		claudeFlag  bool
+		cursorFlag  bool
+		droidFlag   bool
+		cascadeFlag bool
+		codexFlag   bool
 	)
 
 	fs.StringVar(&binaryPath, "binary", "", "Path to hooks binary (required)")
@@ -211,6 +213,7 @@ func runInstall(args []string) {
 	fs.BoolVar(&cursorFlag, "cursor", false, "Install to Cursor only")
 	fs.BoolVar(&droidFlag, "droid", false, "Install to Factory Droid only")
 	fs.BoolVar(&cascadeFlag, "cascade", false, "Install to Windsurf Cascade only")
+	fs.BoolVar(&codexFlag, "codex", false, "Install to OpenAI Codex only")
 
 	fs.Usage = func() {
 		fmt.Println(`Install hooks to AI coding agent config files.
@@ -224,6 +227,7 @@ Examples:
   hookshot install --binary ./my-hooks --cursor   # Cursor only
   hookshot install --binary ./my-hooks --droid    # Factory Droid only
   hookshot install --binary ./my-hooks --cascade  # Windsurf Cascade only
+  hookshot install --binary ./my-hooks --codex    # OpenAI Codex only
 
 Flags:`)
 		fs.PrintDefaults()
@@ -251,11 +255,12 @@ Flags:`)
 	}
 
 	// If none specified, install to all
-	if !claudeFlag && !cursorFlag && !droidFlag && !cascadeFlag {
+	if !claudeFlag && !cursorFlag && !droidFlag && !cascadeFlag && !codexFlag {
 		claudeFlag = true
 		cursorFlag = true
 		droidFlag = true
 		cascadeFlag = true
+		codexFlag = true
 	}
 
 	if claudeFlag {
@@ -286,11 +291,21 @@ Flags:`)
 		}
 	}
 
+	if codexFlag {
+		if err := installCodex(absPath); err != nil {
+			fmt.Fprintf(os.Stderr, "Error installing to OpenAI Codex: %v\n", err)
+			os.Exit(1)
+		}
+	}
+
 	fmt.Println("\nInstallation complete!")
 }
 
 func installClaude(binaryPath string) error {
-	homeDir, _ := os.UserHomeDir()
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("resolving home directory: %w", err)
+	}
 	configPath := filepath.Join(homeDir, ".claude", "settings.json")
 
 	fmt.Printf("Installing to Claude Code (%s)...\n", configPath)
@@ -355,7 +370,10 @@ func installClaude(binaryPath string) error {
 }
 
 func installCursor(binaryPath string) error {
-	homeDir, _ := os.UserHomeDir()
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("resolving home directory: %w", err)
+	}
 	configPath := filepath.Join(homeDir, ".cursor", "hooks.json")
 
 	fmt.Printf("Installing to Cursor (%s)...\n", configPath)
@@ -390,7 +408,10 @@ func installCursor(binaryPath string) error {
 }
 
 func installDroid(binaryPath string) error {
-	homeDir, _ := os.UserHomeDir()
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("resolving home directory: %w", err)
+	}
 	configPath := filepath.Join(homeDir, ".factory", "settings.json")
 
 	fmt.Printf("Installing to Factory Droid (%s)...\n", configPath)
@@ -454,8 +475,89 @@ func installDroid(binaryPath string) error {
 	return nil
 }
 
+func installCodex(binaryPath string) error {
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("resolving home directory: %w", err)
+	}
+	configPath := filepath.Join(homeDir, ".codex", "hooks.json")
+
+	fmt.Printf("Installing to OpenAI Codex (%s)...\n", configPath)
+
+	// Read existing config or create new
+	var config map[string]any
+	data, err := os.ReadFile(configPath)
+	if err == nil {
+		json.Unmarshal(data, &config)
+	}
+	if config == nil {
+		config = make(map[string]any)
+	}
+
+	// Codex hook config follows the same JSON shape as Claude Code's
+	// settings but lives in ~/.codex/hooks.json. Matchers include
+	// "mcp__.*" so MCP tool calls reach the hook binary. "apply_patch"
+	// alone covers Codex file edits — Codex emits "Edit" and "Write" as
+	// matcher aliases for apply_patch, so they're redundant here.
+	hooks := map[string]any{
+		"Stop": []map[string]any{{
+			"hooks": []map[string]any{{
+				"type":    "command",
+				"command": binaryPath + " codex-stop",
+			}},
+		}},
+		"PreToolUse": []map[string]any{{
+			"matcher": "Bash|apply_patch|mcp__.*",
+			"hooks": []map[string]any{{
+				"type":    "command",
+				"command": binaryPath + " codex-pre-tool-use",
+			}},
+		}},
+		"PostToolUse": []map[string]any{{
+			// Bash is required to catch the heredoc-style file edits
+			// (`apply_patch <<'PATCH' … PATCH`) and greenfield writes
+			// (`cat <<'EOF' > FILE … EOF`) Codex 0.130.0+ routes
+			// through plain Bash in addition to the apply_patch tool. The
+			// unified codex-post-tool-use bridge parses both shapes via
+			// codex.ParseApplyPatchFromBash / codex.ParseBashRedirectWrite
+			// — but only sees the events if the matcher itself lets
+			// them through.
+			"matcher": "Bash|apply_patch|mcp__.*",
+			"hooks": []map[string]any{{
+				"type":    "command",
+				"command": binaryPath + " codex-post-tool-use",
+			}},
+		}},
+		"UserPromptSubmit": []map[string]any{{
+			"hooks": []map[string]any{{
+				"type":    "command",
+				"command": binaryPath + " codex-user-prompt-submit",
+			}},
+		}},
+	}
+
+	config["hooks"] = hooks
+
+	os.MkdirAll(filepath.Dir(configPath), 0755)
+
+	output, err := json.MarshalIndent(config, "", "  ")
+	if err != nil {
+		return err
+	}
+
+	if err := os.WriteFile(configPath, output, 0644); err != nil {
+		return err
+	}
+
+	fmt.Println("  Installed hooks: Stop, PreToolUse, PostToolUse, UserPromptSubmit")
+	return nil
+}
+
 func installCascade(binaryPath string) error {
-	homeDir, _ := os.UserHomeDir()
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("resolving home directory: %w", err)
+	}
 	configPath := filepath.Join(homeDir, ".codeium", "windsurf", "hooks.json")
 
 	fmt.Printf("Installing to Windsurf Cascade (%s)...\n", configPath)
@@ -463,11 +565,11 @@ func installCascade(binaryPath string) error {
 	// Build hooks config
 	config := map[string]any{
 		"hooks": map[string]any{
-			"pre_run_command":         []map[string]any{{"command": binaryPath + " cascade-pre-run-command"}},
-			"pre_mcp_tool_use":        []map[string]any{{"command": binaryPath + " cascade-pre-mcp-tool-use"}},
-			"pre_user_prompt":         []map[string]any{{"command": binaryPath + " cascade-pre-user-prompt"}},
-			"post_write_code":         []map[string]any{{"command": binaryPath + " cascade-post-write-code"}},
-			"post_cascade_response":   []map[string]any{{"command": binaryPath + " cascade-post-cascade-response"}},
+			"pre_run_command":       []map[string]any{{"command": binaryPath + " cascade-pre-run-command"}},
+			"pre_mcp_tool_use":      []map[string]any{{"command": binaryPath + " cascade-pre-mcp-tool-use"}},
+			"pre_user_prompt":       []map[string]any{{"command": binaryPath + " cascade-pre-user-prompt"}},
+			"post_write_code":       []map[string]any{{"command": binaryPath + " cascade-post-write-code"}},
+			"post_cascade_response": []map[string]any{{"command": binaryPath + " cascade-post-cascade-response"}},
 		},
 	}
 

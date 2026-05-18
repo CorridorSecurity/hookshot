@@ -1,5 +1,5 @@
 // Package hookshot provides a framework for building hooks for AI coding agents
-// like Cursor and Claude Code.
+// like Cursor, Claude Code, Windsurf Cascade, Factory Droid, and OpenAI Codex.
 //
 // Hookshot handles the boilerplate of reading JSON from stdin and writing JSON to stdout,
 // letting you focus on your hook logic. All hooks must use the multi-hook pattern with
