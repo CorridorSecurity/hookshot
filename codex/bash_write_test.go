@@ -386,3 +386,165 @@ func TestParseBashRedirectWrite_PartiallyMalformed_FailsClosed(t *testing.T) {
 		t.Errorf("expected ok=false when later heredoc lacks terminator; got %+v", files)
 	}
 }
+
+// Regression: tee writes its stdin to EVERY file operand, not just
+// the first. The original teeRedirectWrite extracted only the first
+// non-option positional arg and broke out of the loop, so a command
+// like `tee allowed.txt ../../.ssh/authorized_keys <<EOF` would create
+// both files on disk but report only allowed.txt to OnAfterFileEdit.
+// Any cwd-containment or path-deny policy would never see the
+// authorized_keys write — a confused-deputy bypass that needs no
+// shell-expansion trick, since every target is a plain literal that
+// passes wordToLiteral cleanly. This test pins the multi-target shape:
+// one PatchFile per target, all sharing the heredoc body, in source
+// order.
+func TestParseBashRedirectWrite_TeeMultipleTargets_AllReported(t *testing.T) {
+	cmd := "tee allowed.txt ../../.ssh/authorized_keys <<'EOF'\nattacker-controlled\nEOF"
+
+	got, ok := ParseBashRedirectWrite(cmd)
+	if !ok {
+		t.Fatalf("ParseBashRedirectWrite(...) ok = false; want true")
+	}
+	want := []PatchFile{
+		{Operation: "add", FilePath: "allowed.txt", Edits: []PatchEdit{{OldString: "", NewString: "attacker-controlled"}}},
+		{Operation: "add", FilePath: "../../.ssh/authorized_keys", Edits: []PatchEdit{{OldString: "", NewString: "attacker-controlled"}}},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("ParseBashRedirectWrite =\n  %+v\nwant\n  %+v", got, want)
+	}
+}
+
+// Regression: `tee -a FILE1 FILE2 <<EOF` (append mode, multi-target)
+// must still report both targets. Verifies that the `-a` flag is
+// skipped without short-circuiting the rest of the positional walk.
+func TestParseBashRedirectWrite_TeeAppendMultipleTargets(t *testing.T) {
+	cmd := "tee -a log1.txt log2.txt <<'EOF'\nappended\nEOF"
+
+	got, ok := ParseBashRedirectWrite(cmd)
+	if !ok {
+		t.Fatalf("ParseBashRedirectWrite(...) ok = false; want true")
+	}
+	if len(got) != 2 || got[0].FilePath != "log1.txt" || got[1].FilePath != "log2.txt" {
+		t.Fatalf("expected [log1.txt, log2.txt], got %+v", got)
+	}
+}
+
+// Regression: GNU tee accepts `--` as an end-of-options marker, so
+// any subsequent positional starting with `-` is a path, not a flag.
+// Without this handling, a target like `-weird.txt` would be silently
+// dropped from the report (or worse, an attacker could disguise a
+// dangerous path as something the option-strip heuristic skips).
+func TestParseBashRedirectWrite_TeeEndOfOptionsMarker(t *testing.T) {
+	cmd := "tee -a -- -weird.txt other.txt <<'EOF'\nbody\nEOF"
+
+	got, ok := ParseBashRedirectWrite(cmd)
+	if !ok {
+		t.Fatalf("ParseBashRedirectWrite(...) ok = false; want true")
+	}
+	if len(got) != 2 || got[0].FilePath != "-weird.txt" || got[1].FilePath != "other.txt" {
+		t.Fatalf("expected [-weird.txt, other.txt], got %+v", got)
+	}
+}
+
+// Regression: a quoted flag (`"-a"`) is semantically identical to the
+// unquoted form once Bash strips the quotes. The original
+// implementation used Word.Lit() which returns "" for fully-quoted
+// words, so a quoted `-a` would be misclassified as a path and end up
+// in the targets slice. wordToLiteral handles this correctly.
+func TestParseBashRedirectWrite_TeeQuotedFlagSkipped(t *testing.T) {
+	cmd := "tee \"-a\" log.txt <<'EOF'\nbody\nEOF"
+
+	got, ok := ParseBashRedirectWrite(cmd)
+	if !ok {
+		t.Fatalf("ParseBashRedirectWrite(...) ok = false; want true")
+	}
+	if len(got) != 1 || got[0].FilePath != "log.txt" {
+		t.Fatalf("expected single PatchFile for log.txt, got %+v", got)
+	}
+}
+
+// Regression: mvdan.cc/sh represents `2> stderr.log` as
+// {Op: RdrOut, N: lit("2"), …} — the same RedirOperator as a stdout
+// `> file` redirect, distinguished only by the fd field N. The
+// original catRedirectWrite ignored N and just picked the last
+// RdrOut/AppOut entry, so a command like
+// `cat <<EOF > .env 2> allowed.log` would have `out` overwritten by
+// the (later) stderr entry and report `allowed.log` as the write
+// target. Path-deny rules on `.env` and secret scanners would never
+// see the actual write — a complete bypass with no expansion trick.
+func TestParseBashRedirectWrite_CatStderrShadowsStdoutTarget(t *testing.T) {
+	cmd := "cat <<'EOF' > .env 2> allowed.log\nTOKEN=secret\nEOF"
+
+	got, ok := ParseBashRedirectWrite(cmd)
+	if !ok {
+		t.Fatalf("ParseBashRedirectWrite(...) ok = false; want true")
+	}
+	if len(got) != 1 {
+		t.Fatalf("expected 1 PatchFile, got %d: %+v", len(got), got)
+	}
+	if got[0].FilePath != ".env" {
+		t.Errorf("FilePath = %q, want .env (stderr 2> redirect must not shadow stdout target)",
+			got[0].FilePath)
+	}
+	if got[0].Edits[0].NewString != "TOKEN=secret" {
+		t.Errorf("NewString = %q, want %q", got[0].Edits[0].NewString, "TOKEN=secret")
+	}
+}
+
+// Regression: explicit `1>` is identical to bare `>` — both target
+// stdout. Verify the fd filter accepts `1` as a synonym for "no fd".
+func TestParseBashRedirectWrite_CatExplicitStdoutFd(t *testing.T) {
+	cmd := "cat <<'EOF' 1> out.txt\nbody\nEOF"
+
+	got, ok := ParseBashRedirectWrite(cmd)
+	if !ok {
+		t.Fatalf("ParseBashRedirectWrite(...) ok = false; want true")
+	}
+	if got[0].FilePath != "out.txt" {
+		t.Errorf("FilePath = %q, want out.txt", got[0].FilePath)
+	}
+}
+
+// Regression: a cat statement whose ONLY `>` redirect is on a
+// non-stdout fd (e.g. `cat <<EOF 2> log.txt` — stdin from heredoc,
+// stderr to log.txt, stdout discarded) has no actual write target we
+// can attribute to the heredoc body. The heredoc body just goes to
+// stdout (which here is the default tty/pipe), so we must NOT report
+// log.txt as if the heredoc landed there. The detector returns
+// ok=false and the unified bridge's fallback handles the raw command.
+func TestParseBashRedirectWrite_CatStderrOnlyRedirect_NotReported(t *testing.T) {
+	cmd := "cat <<'EOF' 2> log.txt\nbody\nEOF"
+
+	if files, ok := ParseBashRedirectWrite(cmd); ok {
+		t.Errorf("expected ok=false when only redirect is non-stdout; got %+v", files)
+	}
+}
+
+// Regression: `&>` (RdrAll) redirects both stdout and stderr to a
+// single file. That file IS the heredoc's write target, so it must
+// be reported. Without explicit handling of RdrAll/AppAll, a command
+// like `cat <<EOF &> .env` would silently bypass detection.
+func TestParseBashRedirectWrite_CatRdrAll(t *testing.T) {
+	cmd := "cat <<'EOF' &> combined.log\nbody\nEOF"
+
+	got, ok := ParseBashRedirectWrite(cmd)
+	if !ok {
+		t.Fatalf("ParseBashRedirectWrite(...) ok = false; want true")
+	}
+	if got[0].FilePath != "combined.log" {
+		t.Errorf("FilePath = %q, want combined.log", got[0].FilePath)
+	}
+}
+
+// Regression: a tee statement with multiple targets where ONE target
+// is unparseable (empty word offsets, etc.) must fail closed for the
+// whole statement — partial coverage of a multi-target tee is the
+// exact bypass we're guarding against. We trigger the empty-path
+// codepath via `tee "" foo.txt <<EOF` (an empty literal target).
+func TestParseBashRedirectWrite_TeeUnparseableTarget_FailsClosed(t *testing.T) {
+	cmd := "tee \"\" foo.txt <<'EOF'\nbody\nEOF"
+
+	if files, ok := ParseBashRedirectWrite(cmd); ok {
+		t.Errorf("expected ok=false when a tee target is empty; got %+v", files)
+	}
+}
