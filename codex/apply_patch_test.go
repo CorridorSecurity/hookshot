@@ -467,3 +467,166 @@ func TestParseApplyPatchFromBash_NonHeredocInvocationSkipped(t *testing.T) {
 		t.Error("apply_patch without heredoc wrongly detected as heredoc invocation")
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Structured-construct regression tests. The previous regex+strings.Index
+// detector only looked at byte-level neighborhood of `apply_patch`; nested
+// invocations were detected by accident. The AST walker visits every Stmt,
+// so any control-flow construct that contains an apply_patch heredoc must
+// still be detected. These tests pin that behavior so a future refactor
+// that limits the walk (e.g. "only top-level Stmts" or "stop at first
+// match") can't silently regress detection coverage.
+
+func TestParseApplyPatchFromBash_InvocationInsideIfThen(t *testing.T) {
+	cmd := "if true; then apply_patch <<'PATCH'\n" +
+		"*** Begin Patch\n" +
+		"*** Add File: ifthen.txt\n" +
+		"+x\n" +
+		"*** End Patch\n" +
+		"PATCH\n" +
+		"fi"
+	files, ok := ParseApplyPatchFromBash(cmd)
+	if !ok {
+		t.Fatal("if/then-nested apply_patch: returned ok=false, want true")
+	}
+	if len(files) != 1 || files[0].FilePath != "ifthen.txt" {
+		t.Errorf("files = %+v, want one add for ifthen.txt", files)
+	}
+}
+
+func TestParseApplyPatchFromBash_InvocationInsideFunctionBody(t *testing.T) {
+	// A function defined and called in one block. Both the definition
+	// body (which is parsed by the AST walker) and the call site live
+	// inside the same Bash command. The invocation inside the function
+	// body must still trigger detection — otherwise a Codex prompt
+	// that wraps its writes in `do_patch(){ ... }; do_patch` would
+	// silently bypass the hook. The `}` and `do_patch` lines are
+	// formatted on separate lines because Bash requires the heredoc
+	// terminator to occupy a line by itself; placing `}` on the same
+	// line as `PATCH` would make the closing brace part of the body.
+	cmd := "do_patch() {\n" +
+		"apply_patch <<'PATCH'\n" +
+		"*** Begin Patch\n" +
+		"*** Add File: fnbody.txt\n" +
+		"+x\n" +
+		"*** End Patch\n" +
+		"PATCH\n" +
+		"}\n" +
+		"do_patch"
+	files, ok := ParseApplyPatchFromBash(cmd)
+	if !ok {
+		t.Fatal("function-body apply_patch: returned ok=false, want true")
+	}
+	if len(files) != 1 || files[0].FilePath != "fnbody.txt" {
+		t.Errorf("files = %+v, want one add for fnbody.txt", files)
+	}
+}
+
+func TestParseApplyPatchFromBash_InvocationAfterAndChain(t *testing.T) {
+	// Short-circuit `&&` chaining is the most common shape Codex
+	// emits for "do precondition then patch", e.g. `cd repo &&
+	// apply_patch <<…`. The walker must descend into BinaryCmd nodes.
+	cmd := "cd /tmp && apply_patch <<'PATCH'\n" +
+		"*** Begin Patch\n" +
+		"*** Add File: andchain.txt\n" +
+		"+x\n" +
+		"*** End Patch\n" +
+		"PATCH"
+	files, ok := ParseApplyPatchFromBash(cmd)
+	if !ok {
+		t.Fatal("&& chained apply_patch: returned ok=false, want true")
+	}
+	if len(files) != 1 || files[0].FilePath != "andchain.txt" {
+		t.Errorf("files = %+v, want one add for andchain.txt", files)
+	}
+}
+
+func TestParseApplyPatchFromBash_InvocationInPipeline(t *testing.T) {
+	// apply_patch as the sink of a pipeline. Unusual (Codex normally
+	// feeds the patch through a heredoc, not stdin from another
+	// command), but valid Bash: the body still arrives via heredoc on
+	// the same Stmt as the apply_patch CallExpr. The walker must
+	// descend through the pipeline operator.
+	cmd := "echo unused | apply_patch <<'PATCH'\n" +
+		"*** Begin Patch\n" +
+		"*** Add File: pipeline.txt\n" +
+		"+x\n" +
+		"*** End Patch\n" +
+		"PATCH"
+	files, ok := ParseApplyPatchFromBash(cmd)
+	if !ok {
+		t.Fatal("pipeline-sink apply_patch: returned ok=false, want true")
+	}
+	if len(files) != 1 || files[0].FilePath != "pipeline.txt" {
+		t.Errorf("files = %+v, want one add for pipeline.txt", files)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// False-positive guards on lookalike command names. The implementation
+// matches the literal `apply_patch` or the suffix `*/apply_patch` to
+// allow absolute paths to per-session shim binaries. Anything else must
+// NOT be detected — otherwise a legitimate command like
+// `apply_patcher <<EOF ... EOF` (a hypothetical wrapper script) would
+// be misclassified and have its body interpreted as a patch envelope.
+
+func TestParseApplyPatchFromBash_LookalikeCommandNamesSkipped(t *testing.T) {
+	bodyTail := " <<'X'\n*** Begin Patch\n*** Add File: a.txt\n+x\n*** End Patch\nX"
+	lookalikes := []string{
+		"apply_patcher",                    // trailing letter
+		"apply_patch_v2",                   // trailing token
+		"myapply_patch",                    // leading text, no slash separator
+		"not_apply_patch",                  // looks like apply_patch but isn't
+		"/opt/myapply_patch",               // suffix doesn't start with "/apply_patch"
+		"/opt/tools/apply_patch_wrapper",   // path suffix isn't "/apply_patch"
+	}
+	for _, name := range lookalikes {
+		cmd := name + bodyTail
+		if files, ok := ParseApplyPatchFromBash(cmd); ok {
+			t.Errorf("lookalike %q wrongly detected as apply_patch (files=%+v)", name, files)
+		}
+	}
+}
+
+func TestParseApplyPatchFromBash_AbsolutePathSuffixMatches(t *testing.T) {
+	// The complement of the lookalike test above: any absolute or
+	// relative path whose final segment is exactly `apply_patch` must
+	// be detected. This covers both the Codex per-session shim
+	// (`/Users/.../codex-arg0.../apply_patch`) and developer-installed
+	// binaries (`/usr/local/bin/apply_patch`, `./apply_patch`).
+	paths := []string{
+		"/usr/local/bin/apply_patch",
+		"./apply_patch",
+		"bin/apply_patch",
+	}
+	for _, p := range paths {
+		cmd := p + " <<'PATCH'\n" +
+			"*** Begin Patch\n" +
+			"*** Add File: a.txt\n" +
+			"+x\n" +
+			"*** End Patch\n" +
+			"PATCH"
+		if _, ok := ParseApplyPatchFromBash(cmd); !ok {
+			t.Errorf("path %q not detected as apply_patch invocation", p)
+		}
+	}
+}
+
+func TestParseApplyPatchFromBash_DecoyCommandWithApplyPatchArgSkipped(t *testing.T) {
+	// `cat` called with arguments that contain the literal string
+	// `apply_patch` (filename, comment, etc.) must not trip detection.
+	// The AST identifies the call as `cat`, and arguments are not
+	// walked as Stmts, so this should naturally be skipped — but the
+	// test pins the behavior in case a future refactor starts
+	// searching argument text.
+	cmds := []string{
+		"cat docs/apply_patch_reference.md",
+		"ls -la /opt/tools/apply_patch",
+		"grep apply_patch /var/log/codex.log",
+	}
+	for _, c := range cmds {
+		if _, ok := ParseApplyPatchFromBash(c); ok {
+			t.Errorf("decoy command %q wrongly detected", c)
+		}
+	}
+}
