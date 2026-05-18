@@ -49,7 +49,7 @@ you.
 | SessionStart | `codex.SessionStartInput` / `Output` | `source` is `startup`, `resume`, or `clear`. |
 | PreToolUse | `codex.PreToolUseInput` / `Output` | `tool_name` is `Bash`, `apply_patch`, or `mcp__server__tool`. See **Ask is not enforced** below. |
 | PermissionRequest | `codex.PermissionRequestInput` / `Output` | Codex-specific. Fires only when Codex is about to surface an approval prompt; see below. |
-| PostToolUse | `codex.PostToolUseInput` / `Output` | See **apply_patch on the unified API** below. |
+| PostToolUse | `codex.PostToolUseInput` / `Output` | Codex 0.130.0+ routes most file edits through `Bash` rather than `apply_patch`/`Write`/`Edit`. See **Bash bridge** and **apply_patch on the unified API** below. |
 | UserPromptSubmit | `codex.UserPromptSubmitInput` / `Output` | Same shape as Claude. |
 | Stop | `codex.StopInput` / `Output` | Same shape as Claude; Codex expects JSON on stdout (not plain text). |
 
@@ -150,6 +150,154 @@ The same parser is also exported as
 `codex.ParseApplyPatch(rawCommand string) []codex.PatchFile` for callers
 that want to parse a patch envelope themselves — for example from the raw
 `codex.PostToolUseInput.ToolInput`.
+
+## Bash bridge: file edits routed through Bash
+
+Codex `0.130.0`+ routes most file operations through plain `Bash`
+invocations rather than the native `apply_patch`, `Write`, or `Edit`
+tools. The unified `hookshot.OnAfterFileEdit` bridge recognizes this
+and dispatches the same per-file pipeline as the native shapes, so
+policy handlers see one `FileEditContext` per file regardless of how
+Codex chose to encode the edit.
+
+The four shapes the bridge recognizes today:
+
+| `tool_name`    | `tool_input.command` shape                                            | Parser                          |
+|----------------|-----------------------------------------------------------------------|---------------------------------|
+| `Write` / `Edit` | (native fields — uncommon on 0.130.0+)                              | inline                          |
+| `apply_patch`  | unified-diff envelope, no Bash wrapper                                | `codex.ParseApplyPatch`         |
+| `Bash`         | `apply_patch <<'PATCH' … *** End Patch … PATCH`                       | `codex.ParseApplyPatchFromBash` |
+| `Bash`         | `cat <<'EOF' > FILE … EOF` or `tee FILE <<'EOF' … EOF`                | `codex.ParseBashRedirectWrite`  |
+
+This is why the `PostToolUse` matcher in `~/.codex/hooks.json` must
+include `Bash` (not just `apply_patch`):
+
+```jsonc
+"PostToolUse": [{ "matcher": "Bash|apply_patch|mcp__.*", /* … */ }]
+```
+
+`hookshot install --codex` writes this matcher by default. If you
+configured hooks before adding the `Bash` token, you'll see zero
+`afterFileEdit` events for any Codex session that edits or creates
+files — that's the symptom that motivated this bridge.
+
+### `apply_patch` via Bash heredoc
+
+Edits to existing files almost always arrive as a Bash heredoc that
+pipes a unified-diff envelope into `apply_patch`. Two shape variants
+show up in practice:
+
+- **Built-in name**: `apply_patch <<'PATCH' … *** End Patch … PATCH`
+- **Per-session shim**: `/Users/me/.codex/tmp/arg0/codex-arg0…/apply_patch <<'PATCH' …`
+
+`codex.ParseApplyPatchFromBash` accepts both. Detection requires the
+literal token `apply_patch` followed by a heredoc operator (`<<` or
+`<<-`) somewhere before the `*** Begin Patch` marker, which keeps
+plain Bash commands that merely *mention* `apply_patch` (filenames,
+docs, log lines) from spuriously firing the file-edit handler.
+
+Once detected, the envelope is fed to `codex.ParseApplyPatch` and
+the per-file dispatch behaves exactly like the native `apply_patch`
+case described above — including the rename double-invocation for
+`*** Move to:` paths.
+
+### Greenfield writes via `cat` / `tee` heredoc
+
+New-file creation typically arrives as `cat <<'EOF' > FILE … EOF`
+(or, less commonly, `tee FILE <<'EOF' … EOF`). There's no prior
+content to diff against, so `codex.ParseBashRedirectWrite`
+synthesizes a single `PatchEdit{OldString: "", NewString: <body>}`
+and a `PatchFile{Operation: "add", FilePath: <FILE>, Edits: …}`,
+then dispatches it through the same per-file pipeline. Variants
+currently recognized:
+
+- quoted (`<<'EOF'`, `<<"EOF"`) and unquoted (`<<EOF`) delimiters,
+- `<<-` tab-stripping (POSIX: strips leading **tabs**, not spaces,
+  from each body line and from the delimiter line),
+- `>` (overwrite) and `>>` (append) redirections,
+- `cd … && cat <<'EOF' > FILE … EOF` cwd-prefixed forms.
+
+File paths are surfaced verbatim — `../`, `~/`, and absolute paths
+pass through unchanged so downstream policies can apply their own
+canonicalization rules (the bridge can't safely guess the agent's
+cwd, so it doesn't try).
+
+If a Codex Bash command matches neither parser, the
+`codex-post-tool-use` handler returns `PostToolOK()` without invoking
+`OnAfterFileEdit`. That matches the platform semantics of every
+other backend: non-edit Bash commands belong to `OnBeforeExecution`,
+not `OnAfterFileEdit`.
+
+### Calling the parsers from your own handler
+
+Every parser used by the bridge is exported from the `codex` package
+so handlers that want full control can short-circuit the unified
+dispatch:
+
+```go
+func ParseApplyPatch(rawCommand string) []PatchFile
+func ParseApplyPatchFromBash(bashCommand string) (files []PatchFile, ok bool)
+func ParseBashRedirectWrite(bashCommand string) (files []PatchFile, ok bool)
+
+type PatchFile struct {
+    Operation   string // "add", "update", or "delete"
+    FilePath    string
+    NewFilePath string // set for "*** Move to:" renames
+    Edits       []PatchEdit
+}
+
+type PatchEdit struct {
+    OldString string
+    NewString string
+}
+```
+
+Wiring them up manually:
+
+```go
+hookshot.Register("codex-post-tool-use", func() {
+    hookshot.Run(func(input codex.PostToolUseInput) codex.PostToolUseOutput {
+        if input.ToolName != "Bash" {
+            return codex.PostToolOK()
+        }
+        var bash struct{ Command string `json:"command"` }
+        json.Unmarshal(input.ToolInput, &bash)
+
+        if files, ok := codex.ParseApplyPatchFromBash(bash.Command); ok {
+            return scanPatches(files)
+        }
+        if files, ok := codex.ParseBashRedirectWrite(bash.Command); ok {
+            return scanPatches(files)
+        }
+        return codex.PostToolOK()
+    })
+})
+```
+
+### Known limitations
+
+The Bash bridge is deliberately conservative — it short-circuits on
+ambiguous input rather than guessing. Known gaps today:
+
+- **`echo … > FILE` and `printf … > FILE` writes are not
+  recognized.** Codex prefers heredocs for any multi-line content,
+  so these are rare in practice. If you observe them in your
+  sessions please open an issue with the captured
+  `tool_input.command`.
+- **Only the first `cat`/`tee` heredoc redirect in a single Bash
+  command is currently surfaced.** A command that performs several
+  heredoc writes in sequence (e.g.
+  `cat <<EOF > a.txt … EOF; cat <<EOF > b.txt … EOF`) will fire
+  `OnAfterFileEdit` only for the first file. As defence in depth
+  against this gap, also register an `OnBeforeExecution` policy
+  that grep/regex-scans `ctx.Command` for sensitive paths in Bash
+  commands — that handler runs *before* any heredoc writes execute
+  and isn't subject to the first-match restriction.
+- **The bridge does not normalize file paths.** `../`, `~/`, and
+  symbolic links are passed through verbatim. Handlers that want to
+  enforce a containment policy should apply `filepath.Clean` and a
+  cwd-escape check themselves (the bridge can't safely assume the
+  agent's working directory matches the hook process's).
 
 ## PostToolUse semantics
 
