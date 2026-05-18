@@ -1,57 +1,18 @@
 package codex
 
 import (
-	"regexp"
 	"strings"
+
+	"mvdan.cc/sh/v3/syntax"
 )
 
-// catRedirectHeredocRE matches the leading `cat <<['"]?DELIM['"]? > FILE`
-// (or `>>`) shape that Codex uses for greenfield file writes. The regex
-// must hold together because Codex emits this command without any
-// surrounding context — it's the entire `tool_input.command` payload.
-//
-// Group layout (named for legibility in the implementation):
-//
-//	op    — the heredoc operator, "<<" or "<<-".
-//	delim — the heredoc delimiter ("EOF", "PATCH", …), with surrounding
-//	        quotes (if any) stripped by the caller.
-//	redir — the redirection operator, ">" or ">>".
-//	path  — the target file path. Anything up to the first whitespace,
-//	        `&`, `;`, `|`, or end-of-line.
-//
-// Why this exact shape: the captured probe payloads (see
-// vscode-extension/docs/HOOKS.md § "Probing Codex hooks") show Codex
-// invoking writes as `cat <<'EOF' > greet.txt` for the greet.txt case
-// and `cd … && cat <<'EOF' > path` for cwd-prefixed variants. Heredoc
-// quoting can be single, double, or absent; the redirect operator can
-// be `>` (overwrite) or `>>` (append). The optional `-` after `<<`
-// covers the `<<-DELIM` shape that strips leading tabs from the body —
-// uncommon in Codex output but cheap to support.
-// `\s` would also greedy-match the trailing newline + any leading blank
-// lines of the body. Use `[ \t]*` for header-line whitespace so the
-// header match always ends at the EOL boundary and extractHeredocBody
-// can preserve leading blank lines in the body exactly as written.
-var catRedirectHeredocRE = regexp.MustCompile(
-	`(?m)(?:^|[;&|])[ \t]*cat[ \t]+(?P<op><<-?)[ \t]*(?P<delim>'[^']+'|"[^"]+"|[A-Za-z_][A-Za-z0-9_]*)[ \t]*(?P<redir>>>?)[ \t]*(?P<path>[^\s;&|]+)[ \t]*$`,
-)
-
-// teeRedirectHeredocRE covers `tee [-a] FILE [< /dev/null]` and similar
-// shapes where the body is fed from a heredoc opened earlier on the line.
-// Less common than cat but inexpensive to handle, and the variant Codex
-// occasionally emits when it wants tee's "also print to stdout" side
-// effect. Captures match catRedirectHeredocRE's named groups so the
-// caller can use a shared extractor.
-var teeRedirectHeredocRE = regexp.MustCompile(
-	`(?m)(?:^|[;&|])[ \t]*tee[ \t]+(?:-a[ \t]+)?(?P<path>[^\s;&|]+)[ \t]*(?:<[ \t]*/dev/null[ \t]*)?(?P<op><<-?)[ \t]*(?P<delim>'[^']+'|"[^"]+"|[A-Za-z_][A-Za-z0-9_]*)[ \t]*$`,
-)
-
-// ParseBashRedirectWrite inspects a Codex Bash tool command and, if the
-// command is a heredoc-based file write (`cat <<EOF > FILE … EOF`),
-// returns a synthetic PatchFile slice describing the write so the
-// OnAfterFileEdit bridge can dispatch it through the same per-file
-// pipeline as apply_patch invocations. The boolean return reports
-// whether a write was detected, mirroring ParseApplyPatchFromBash's
-// shape so callers can chain detectors:
+// ParseBashRedirectWrite inspects a Codex Bash tool command and, for
+// every heredoc-based file write detected anywhere in the command,
+// returns a synthetic PatchFile so the OnAfterFileEdit bridge can
+// dispatch each write through the same per-file pipeline as
+// apply_patch invocations. The boolean return reports whether at least
+// one write was detected, mirroring ParseApplyPatchFromBash's shape so
+// callers can chain detectors:
 //
 //	if files, ok := ParseApplyPatchFromBash(cmd); ok { … }
 //	if files, ok := ParseBashRedirectWrite(cmd); ok { … }
@@ -63,152 +24,245 @@ var teeRedirectHeredocRE = regexp.MustCompile(
 // on every greenfield write — no afterFileEdit fires, no security scan
 // runs, and the dashboard shows zero SecurityScanResult rows for any
 // Codex session that only creates new files (the exact symptom that
-// motivated this helper; see the regression test below).
+// motivated this helper; see the regression tests below).
 //
-// Heuristics are deliberately tight to keep false positives low:
+// Implementation note: detection runs the command through a real Bash
+// parser (mvdan.cc/sh/v3/syntax) and walks the AST looking for
+// CallExpr statements whose primary command is `cat` or `tee` paired
+// with a heredoc redirect (`<<` or `<<-`, quoted or unquoted) on the
+// same Stmt. This replaced an earlier regex-based implementation that
+// reported only the first match in a command — a multi-heredoc shape
+// like
 //
-//  1. The command must contain a `cat <<…> FILE` or `tee FILE <<…`
-//     line that ends the logical statement (anchored to end-of-line so
-//     trailing tokens like `&& echo done` don't mask the redirect).
-//  2. The heredoc delimiter is extracted as-emitted (`'EOF'`, `"EOF"`,
-//     or bare `EOF`); single- or double-quotes around it are stripped
-//     before scanning the body — Bash treats quoted delimiters as a
-//     "no variable expansion" hint, which doesn't change our body
-//     extraction.
-//  3. Body extraction walks from the line after the matched cat/tee
-//     invocation forward until it sees a line that is exactly the
-//     delimiter (no leading/trailing whitespace, except for `<<-`
-//     which permits leading tabs per POSIX). If the delimiter is
-//     missing the parser returns ok=false rather than guessing — the
-//     command isn't a well-formed heredoc write.
+//	cat <<'EOF' > allowed.txt
+//	ok
+//	EOF
+//	cat <<'EOF' > .env
+//	TOKEN=secret
+//	EOF
 //
-// We never try to evaluate the file path: anything from the post-redir
-// token up to the next whitespace/separator is treated as a literal
-// path. That matches what Codex emits and avoids us silently rewriting
-// `>` redirects to fd numbers or process substitutions, which a real
-// shell parser would have to handle.
+// dispatched only the allowed.txt write to OnAfterFileEdit, silently
+// bypassing path-deny rules and secret scanners for the .env write. A
+// real parser also closes a handful of adjacent gaps the regex never
+// covered: redirects in reverse order (`cat > FILE <<EOF`), quoted
+// paths (`> "name with spaces.txt"`), writes nested inside compound
+// commands (`cd … && cat …`, `if … then cat … fi`, pipelines), and
+// commands that mix `cat` and `tee` heredoc writes. Every recognised
+// write becomes a PatchFile in the order it appears in the command.
+//
+// We deliberately fail closed in two places. (1) If the command is
+// not valid Bash (parser error) this returns (nil, false) — silently
+// treating malformed input as a no-op write would let an attacker
+// construct a heredoc the parser rejects but Codex's actual shell
+// accepts. (2) If a cat/tee statement has a heredoc but no extractable
+// target path (e.g. `cat <<EOF > $(some_cmd)`), that single write is
+// dropped from the result but the rest of the command's writes are
+// still reported, and ok stays true as long as at least one well-formed
+// write was found. Callers that need a stricter posture should layer
+// their own checks; the unified bridge then surfaces the raw command
+// through the existing fallback path.
 func ParseBashRedirectWrite(command string) ([]PatchFile, bool) {
+	// Cheap pre-check: every heredoc-style write contains `<<`. This
+	// keeps the parser allocation off the hot path for plain Bash
+	// commands (`pwd`, `ls`, `git diff`, …) which dominate real Codex
+	// traffic.
 	if !strings.Contains(command, "<<") {
 		return nil, false
 	}
 
-	if files, ok := matchWriteRedirect(command, catRedirectHeredocRE); ok {
-		return files, true
+	file, err := syntax.NewParser().Parse(strings.NewReader(command), "")
+	if err != nil {
+		return nil, false
 	}
-	if files, ok := matchWriteRedirect(command, teeRedirectHeredocRE); ok {
-		return files, true
+
+	var files []PatchFile
+	syntax.Walk(file, func(node syntax.Node) bool {
+		stmt, ok := node.(*syntax.Stmt)
+		if !ok {
+			return true
+		}
+		if patch, ok := bashRedirectWriteFromStmt(command, stmt); ok {
+			files = append(files, patch)
+		}
+		return true
+	})
+	if len(files) == 0 {
+		return nil, false
 	}
-	return nil, false
+	return files, true
 }
 
-func matchWriteRedirect(command string, re *regexp.Regexp) ([]PatchFile, bool) {
-	// FindStringSubmatchIndex returns byte offsets so we can locate the
-	// heredoc body that begins on the line after the matched header.
-	idx := re.FindStringSubmatchIndex(command)
-	if idx == nil {
-		return nil, false
+// bashRedirectWriteFromStmt extracts a PatchFile from stmt if its
+// primary command is a recognised heredoc-style file write (cat or
+// tee). Any other shape returns ok=false so syntax.Walk can quietly
+// skip it.
+func bashRedirectWriteFromStmt(command string, stmt *syntax.Stmt) (PatchFile, bool) {
+	call, ok := stmt.Cmd.(*syntax.CallExpr)
+	if !ok || len(call.Args) == 0 {
+		return PatchFile{}, false
 	}
+	switch call.Args[0].Lit() {
+	case "cat":
+		return catRedirectWrite(command, stmt)
+	case "tee":
+		return teeRedirectWrite(command, stmt, call)
+	}
+	return PatchFile{}, false
+}
 
-	names := re.SubexpNames()
-	groups := map[string]string{}
-	for i, name := range names {
-		if name == "" {
-			continue
-		}
-		if start, end := idx[2*i], idx[2*i+1]; start >= 0 && end >= 0 {
-			groups[name] = command[start:end]
+// catRedirectWrite handles `cat <<EOF > FILE` and `cat > FILE <<EOF`.
+// Both shapes carry the heredoc and the `>`/`>>` target as separate
+// entries on stmt.Redirs; we pick the last `>`/`>>` (Bash semantics —
+// a later redirect on the same fd shadows an earlier one) and require
+// exactly one heredoc on the statement. Two heredocs on a single cat
+// is invalid Bash and never emitted by Codex; we bail rather than
+// guess which one feeds the file.
+func catRedirectWrite(command string, stmt *syntax.Stmt) (PatchFile, bool) {
+	var hdoc, out *syntax.Redirect
+	for _, r := range stmt.Redirs {
+		switch r.Op {
+		case syntax.Hdoc, syntax.DashHdoc:
+			if hdoc != nil {
+				return PatchFile{}, false
+			}
+			hdoc = r
+		case syntax.RdrOut, syntax.AppOut:
+			out = r
 		}
 	}
-
-	delim := stripDelimQuotes(groups["delim"])
-	if delim == "" {
-		return nil, false
+	if hdoc == nil || out == nil {
+		return PatchFile{}, false
 	}
-	path := strings.TrimSpace(groups["path"])
+	path := wordText(command, out.Word)
 	if path == "" {
-		return nil, false
+		return PatchFile{}, false
 	}
-
-	stripIndent := groups["op"] == "<<-"
-	body, ok := extractHeredocBody(command, idx[1], delim, stripIndent)
+	body, ok := heredocBodyContent(command, hdoc)
 	if !ok {
-		return nil, false
+		return PatchFile{}, false
 	}
-
-	return []PatchFile{{
+	return PatchFile{
 		Operation: "add",
 		FilePath:  path,
 		Edits: []PatchEdit{{
 			OldString: "",
 			NewString: body,
 		}},
-	}}, true
+	}, true
 }
 
-// stripDelimQuotes removes surrounding single or double quotes from a
-// heredoc delimiter token. Bash treats `<<'EOF'`, `<<"EOF"`, and
-// `<<EOF` as the same end marker; the only difference is whether
-// variable/command substitution happens in the body. Body extraction
-// doesn't care about substitution semantics — we record what Codex
-// physically wrote — so we normalize away the quotes here.
-func stripDelimQuotes(delim string) string {
-	if len(delim) >= 2 {
-		first, last := delim[0], delim[len(delim)-1]
-		if (first == '\'' || first == '"') && first == last {
-			return delim[1 : len(delim)-1]
+// teeRedirectWrite handles `tee [-a] FILE [< /dev/null] <<EOF`. The
+// target path is the first positional argument after `tee` that doesn't
+// start with `-` (so `-a` and any future flag tokens are skipped); the
+// heredoc lives on stmt.Redirs alongside any stdin redirects.
+func teeRedirectWrite(command string, stmt *syntax.Stmt, call *syntax.CallExpr) (PatchFile, bool) {
+	var path string
+	for _, arg := range call.Args[1:] {
+		lit := arg.Lit()
+		if strings.HasPrefix(lit, "-") {
+			continue
 		}
+		path = wordText(command, arg)
+		break
 	}
-	return delim
+	if path == "" {
+		return PatchFile{}, false
+	}
+	var hdoc *syntax.Redirect
+	for _, r := range stmt.Redirs {
+		if r.Op != syntax.Hdoc && r.Op != syntax.DashHdoc {
+			continue
+		}
+		if hdoc != nil {
+			return PatchFile{}, false
+		}
+		hdoc = r
+	}
+	if hdoc == nil {
+		return PatchFile{}, false
+	}
+	body, ok := heredocBodyContent(command, hdoc)
+	if !ok {
+		return PatchFile{}, false
+	}
+	return PatchFile{
+		Operation: "add",
+		FilePath:  path,
+		Edits: []PatchEdit{{
+			OldString: "",
+			NewString: body,
+		}},
+	}, true
 }
 
-// extractHeredocBody returns the heredoc body that follows headerEnd
-// (the byte offset of the end of the matched cat/tee invocation line)
-// up to but not including the line that contains only `delim`. The
-// returned body never includes the trailing delimiter line itself.
-//
-// stripIndent reflects the `<<-` operator, which strips leading TAB
-// characters from each body line and from the delimiter line; spaces
-// are NOT stripped, per POSIX. We follow the same rule so the body we
-// hand to OnAfterFileEdit matches what Bash would have written to the
-// file.
-func extractHeredocBody(command string, headerEnd int, delim string, stripIndent bool) (string, bool) {
-	// Body starts on the line after the header. Advance past the
-	// optional `\r\n` or `\n` immediately following the match.
-	start := headerEnd
-	if start < len(command) && command[start] == '\r' {
-		start++
+// wordText returns a usable string representation of a syntax.Word —
+// preferring the unquoted literal value when all parts reduce to plain
+// text, otherwise falling back to the verbatim source slice. The
+// fallback matters for paths like `$HOME/.env` where downstream policy
+// still needs to see the surface text even though Bash would expand it.
+func wordText(command string, w *syntax.Word) string {
+	if w == nil {
+		return ""
 	}
-	if start < len(command) && command[start] == '\n' {
-		start++
+	if lit, ok := wordToLiteral(w); ok {
+		return lit
 	}
+	start := int(w.Pos().Offset())
+	end := int(w.End().Offset())
+	if start < 0 || end > len(command) || start >= end {
+		return ""
+	}
+	return command[start:end]
+}
 
-	rest := command[start:]
-	lines := strings.SplitAfter(rest, "\n")
-
-	var body strings.Builder
-	for _, raw := range lines {
-		// Drop the trailing newline so we can compare against delim
-		// without worrying about \r\n vs \n.
-		line := strings.TrimRight(raw, "\r\n")
-		cmpLine := line
-		if stripIndent {
-			cmpLine = strings.TrimLeft(cmpLine, "\t")
-		}
-		if cmpLine == delim {
-			result := body.String()
-			result = strings.TrimSuffix(result, "\n")
-			return result, true
-		}
-		if stripIndent {
-			line = strings.TrimLeft(line, "\t")
-		}
-		body.WriteString(line)
-		if strings.HasSuffix(raw, "\n") {
-			body.WriteByte('\n')
+// wordToLiteral returns w's effective literal text if every part is a
+// plain literal or quoted literal (no expansions). The second return
+// is false when the word requires shell evaluation; callers fall back
+// to the verbatim source slice via wordText.
+func wordToLiteral(w *syntax.Word) (string, bool) {
+	var b strings.Builder
+	for _, part := range w.Parts {
+		switch p := part.(type) {
+		case *syntax.Lit:
+			b.WriteString(p.Value)
+		case *syntax.SglQuoted:
+			b.WriteString(p.Value)
+		case *syntax.DblQuoted:
+			for _, inner := range p.Parts {
+				lit, ok := inner.(*syntax.Lit)
+				if !ok {
+					return "", false
+				}
+				b.WriteString(lit.Value)
+			}
+		default:
+			return "", false
 		}
 	}
-	// Missing terminator — bail rather than silently treating the
-	// remainder of the command as body. A well-formed Codex command
-	// always terminates the heredoc.
-	return "", false
+	return b.String(), true
+}
+
+// heredocBodyContent returns the on-disk content a heredoc redirect
+// would have produced — the body bytes with the trailing delimiter
+// line removed and POSIX `<<-` tab-stripping applied. mvdan.cc/sh's
+// Hdoc Word spans `body…\nDELIM`, so we strip from the last newline
+// onward to drop the terminator. An entirely empty heredoc
+// (`cat <<EOF\nEOF`) appears as r.Hdoc == nil — that's still a write
+// (Bash would create an empty file), so we surface it as "".
+func heredocBodyContent(command string, r *syntax.Redirect) (string, bool) {
+	if r == nil {
+		return "", false
+	}
+	if r.Hdoc == nil {
+		return "", true
+	}
+	body, ok := heredocBodyFromRedirect(command, r)
+	if !ok {
+		return "", false
+	}
+	text := body.text
+	if idx := strings.LastIndexByte(text, '\n'); idx >= 0 {
+		return text[:idx], true
+	}
+	return "", true
 }
