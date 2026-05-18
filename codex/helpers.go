@@ -25,12 +25,30 @@ var StopWith = claude.StopWith
 // effectively falls through to the normal flow.
 var Allow = claude.Allow
 
-// AllowSilent permits the tool to execute without showing output.
-var AllowSilent = claude.AllowSilent
+// AllowSilent permits the tool to execute. Codex does NOT support
+// suppressOutput — the Codex CLI rejects the hook output with
+// "PreToolUse hook returned unsupported suppressOutput" — so on Codex the
+// "silent" variant has no equivalent. This helper emits an empty {} which
+// Codex treats as success. Use this instead of claude.AllowSilent in Codex
+// code paths.
+func AllowSilent() PreToolUseOutput {
+	return PreToolUseOutput{}
+}
 
-// AllowWithInput permits the tool with modified input parameters. Note that
-// Codex currently parses but does not enforce updatedInput for PreToolUse.
-var AllowWithInput = claude.AllowWithInput
+// AllowWithInput permits the tool. Codex does NOT support updatedInput —
+// the Codex CLI rejects the hook output with "PreToolUse hook returned
+// unsupported updatedInput" — so the updatedInput argument is dropped on
+// Codex. The reason argument is preserved via permissionDecision: "allow"
+// (which falls open on Codex today). The signature matches
+// claude.AllowWithInput for source compatibility, but callers that need
+// to inject context on Codex should use the model-side tool args instead
+// (Codex passes raw tool input through to MCP tools unchanged).
+func AllowWithInput(reason string, _ map[string]any) PreToolUseOutput {
+	if reason == "" {
+		return PreToolUseOutput{}
+	}
+	return claude.Allow(reason)
+}
 
 // Deny blocks the tool from executing. This is enforced by Codex for Bash
 // and apply_patch tools.

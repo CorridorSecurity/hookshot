@@ -75,6 +75,40 @@ func TestPassThrough(t *testing.T) {
 	}
 }
 
+func TestAllowSilent_DoesNotEmitSuppressOutput(t *testing.T) {
+	// Codex rejects suppressOutput with
+	// "PreToolUse hook returned unsupported suppressOutput".
+	// codex.AllowSilent must NOT set SuppressOutput (unlike claude.AllowSilent).
+	output := AllowSilent()
+	if output.SuppressOutput {
+		t.Error("codex.AllowSilent must not set SuppressOutput (Codex rejects suppressOutput)")
+	}
+	if output.HookSpecificOutput != nil {
+		t.Error("codex.AllowSilent should emit empty {} on Codex (no hookSpecificOutput)")
+	}
+}
+
+func TestAllowWithInput_DropsUpdatedInput(t *testing.T) {
+	// Codex rejects updatedInput with
+	// "PreToolUse hook returned unsupported updatedInput".
+	// codex.AllowWithInput must NOT set UpdatedInput.
+	output := AllowWithInput("trusted", map[string]any{"file_path": "/tmp/x"})
+	if output.HookSpecificOutput != nil && output.HookSpecificOutput.UpdatedInput != nil {
+		t.Error("codex.AllowWithInput must not set UpdatedInput (Codex rejects updatedInput)")
+	}
+	// Reason should still be passed through as permissionDecisionReason.
+	if output.HookSpecificOutput == nil || output.HookSpecificOutput.PermissionDecisionReason != "trusted" {
+		t.Errorf("Reason should be preserved as permissionDecisionReason, got %+v", output.HookSpecificOutput)
+	}
+}
+
+func TestAllowWithInput_EmptyReasonProducesPassThrough(t *testing.T) {
+	output := AllowWithInput("", map[string]any{"k": "v"})
+	if output.HookSpecificOutput != nil {
+		t.Error("codex.AllowWithInput with empty reason should emit empty {} (pass-through)")
+	}
+}
+
 // =============================================================================
 // PermissionRequest Helpers Tests
 // =============================================================================

@@ -149,9 +149,12 @@ func OnStop(handler StopHandler) {
 		})
 	})
 
-	// Codex uses the same JSON protocol as Claude Code
+	// Codex uses the same JSON wire protocol as Claude Code but with stricter
+	// validation. Use codex.* helpers (not claude.*) so any Codex-specific
+	// quirks (e.g. rejected suppressOutput / updatedInput) are handled in
+	// one place — the codex package.
 	Register("codex-stop", func() {
-		Run(func(input claude.StopInput) claude.StopOutput {
+		Run(func(input codex.StopInput) codex.StopOutput {
 			ctx := StopContext{
 				Platform:       PlatformCodex,
 				SessionID:      input.SessionID,
@@ -160,9 +163,9 @@ func OnStop(handler StopHandler) {
 			}
 			decision := handler(ctx)
 			if decision.Continue {
-				return claude.Continue()
+				return codex.Continue()
 			}
-			return claude.Block(decision.Message)
+			return codex.Block(decision.Message)
 		})
 	})
 }
@@ -453,14 +456,16 @@ func OnBeforeExecution(handler ExecutionHandler) {
 		})
 	})
 
-	// Codex PreToolUse (same JSON protocol as Claude Code).
-	// Codex tool names include "Bash", "apply_patch", and MCP names like
-	// "mcp__server__tool". apply_patch is classified as ExecutionTool because
-	// it represents a file edit rather than a shell command or MCP call. For
-	// apply_patch the underlying tool_input.command is parsed and exposed
-	// via ExecutionContext.Command so policies can inspect the patch text.
+	// Codex PreToolUse (same JSON wire protocol as Claude Code, stricter
+	// validation). Codex tool names include "Bash", "apply_patch", and MCP
+	// names like "mcp__server__tool". apply_patch is classified as
+	// ExecutionTool because it represents a file edit rather than a shell
+	// command or MCP call. For apply_patch the underlying tool_input.command
+	// is parsed and exposed via ExecutionContext.Command so policies can
+	// inspect the patch text. Uses codex.* helpers so Codex quirks (no
+	// suppressOutput, no updatedInput) live in the codex package.
 	Register("codex-pre-tool-use", func() {
-		Run(func(input claude.PreToolUseInput) claude.PreToolUseOutput {
+		Run(func(input codex.PreToolUseInput) codex.PreToolUseOutput {
 			var execType ExecutionType
 			if input.ToolName == "Bash" {
 				execType = ExecutionShell
@@ -492,9 +497,13 @@ func OnBeforeExecution(handler ExecutionHandler) {
 			decision := handler(ctx)
 			if decision.Allow {
 				if decision.Reason != "" {
-					return claude.Allow(decision.Reason)
+					return codex.Allow(decision.Reason)
 				}
-				return claude.AllowSilent()
+				// codex.AllowSilent is a Codex-safe no-op (emits {}) — it
+				// does NOT set suppressOutput like claude.AllowSilent,
+				// because Codex rejects that field with "PreToolUse hook
+				// returned unsupported suppressOutput".
+				return codex.AllowSilent()
 			}
 			// Codex currently parses but does not enforce permissionDecision
 			// "ask" for PreToolUse, so an Ask decision would silently fail
@@ -502,9 +511,9 @@ func OnBeforeExecution(handler ExecutionHandler) {
 			// matches the security posture of the other platforms where
 			// Ask actually surfaces an approval prompt.
 			if decision.Ask {
-				return claude.Deny(decision.Reason)
+				return codex.Deny(decision.Reason)
 			}
-			return claude.Deny(decision.Reason)
+			return codex.Deny(decision.Reason)
 		})
 	})
 }
@@ -731,9 +740,9 @@ func OnAfterFileEdit(handler FileEditHandler) {
 	// hooks.json — "Edit" and "Write" matcher aliases exist but are
 	// redundant with "apply_patch".
 	Register("codex-post-tool-use", func() {
-		Run(func(input claude.PostToolUseInput) claude.PostToolUseOutput {
+		Run(func(input codex.PostToolUseInput) codex.PostToolUseOutput {
 			if input.ToolName != "Write" && input.ToolName != "Edit" && input.ToolName != "apply_patch" {
-				return claude.PostToolOK()
+				return codex.PostToolOK()
 			}
 
 			// Write/Edit use the Claude-style schema.
@@ -764,12 +773,12 @@ func OnAfterFileEdit(handler FileEditHandler) {
 
 				decision := handler(ctx)
 				if decision.Block {
-					return claude.PostToolBlock(decision.Reason)
+					return codex.PostToolBlock(decision.Reason)
 				}
 				if decision.Context != "" {
-					return claude.PostToolContext(decision.Context)
+					return codex.PostToolContext(decision.Context)
 				}
-				return claude.PostToolOK()
+				return codex.PostToolOK()
 			}
 
 			// apply_patch: tool_input is {"command": "*** Begin Patch ..."}.
@@ -793,12 +802,12 @@ func OnAfterFileEdit(handler FileEditHandler) {
 				}
 				decision := handler(ctx)
 				if decision.Block {
-					return claude.PostToolBlock(decision.Reason)
+					return codex.PostToolBlock(decision.Reason)
 				}
 				if decision.Context != "" {
-					return claude.PostToolContext(decision.Context)
+					return codex.PostToolContext(decision.Context)
 				}
-				return claude.PostToolOK()
+				return codex.PostToolOK()
 			}
 
 			var (
@@ -840,12 +849,12 @@ func OnAfterFileEdit(handler FileEditHandler) {
 				}
 			}
 			if len(blockReasons) > 0 {
-				return claude.PostToolBlock(strings.Join(blockReasons, "\n"))
+				return codex.PostToolBlock(strings.Join(blockReasons, "\n"))
 			}
 			if len(contexts) > 0 {
-				return claude.PostToolContext(strings.Join(contexts, "\n"))
+				return codex.PostToolContext(strings.Join(contexts, "\n"))
 			}
-			return claude.PostToolOK()
+			return codex.PostToolOK()
 		})
 	})
 }
@@ -987,9 +996,10 @@ func OnPromptSubmit(handler PromptHandler) {
 		})
 	})
 
-	// Codex UserPromptSubmit (same JSON protocol as Claude Code)
+	// Codex UserPromptSubmit (same JSON wire protocol as Claude Code,
+	// stricter validation — use codex.* helpers).
 	Register("codex-user-prompt-submit", func() {
-		Run(func(input claude.UserPromptSubmitInput) claude.UserPromptSubmitOutput {
+		Run(func(input codex.UserPromptSubmitInput) codex.UserPromptSubmitOutput {
 			ctx := PromptContext{
 				Platform:      PlatformCodex,
 				SessionID:     input.SessionID,
@@ -1000,12 +1010,12 @@ func OnPromptSubmit(handler PromptHandler) {
 
 			decision := handler(ctx)
 			if !decision.Allow {
-				return claude.BlockPrompt(decision.Reason)
+				return codex.BlockPrompt(decision.Reason)
 			}
 			if decision.Context != "" {
-				return claude.AddContext(decision.Context)
+				return codex.AddContext(decision.Context)
 			}
-			return claude.AllowPrompt()
+			return codex.AllowPrompt()
 		})
 	})
 }

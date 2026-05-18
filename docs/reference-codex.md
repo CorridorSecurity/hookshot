@@ -60,25 +60,51 @@ a `turn_id` field on turn-scoped events (`PreToolUse`, `PermissionRequest`,
 them. Stop also carries `last_assistant_message`.
 
 Codex enforces `continue: false` on `SessionStart`, `UserPromptSubmit`,
-`PostToolUse`, and `Stop`. For `PreToolUse` and `PermissionRequest`,
-`continue`, `stopReason`, and `suppressOutput` are parsed but currently fail
-open.
+`PostToolUse`, and `Stop`. For `PreToolUse` and `PermissionRequest`, Codex
+rejects `continue`, `stopReason`, and `suppressOutput` with an
+`unsupported <field>` error and discards the whole hook output — these
+fields fail **closed** and must be omitted. The upstream
+[Codex hooks doc](https://developers.openai.com/codex/hooks) currently
+describes these as fail-open; the runtime behavior is fail-closed.
 
-## PreToolUse: Ask is not enforced
+## PreToolUse: which output fields actually work
 
 Codex honors `permissionDecision: "deny"` (or the older `decision: "block"`
-shape) on Bash and `apply_patch`. `"allow"`, `"ask"`, `updatedInput`,
-`additionalContext`, `continue: false`, `stopReason`, and `suppressOutput`
-are parsed but fail open today.
+shape) on Bash and `apply_patch`. Codex also honors
+`hookSpecificOutput.additionalContext`, which is injected as developer
+context without blocking the call (the upstream
+[Codex hooks doc](https://developers.openai.com/codex/hooks#pretooluse)
+shows this case as a first-class example).
 
-Because `"ask"` falls open, `hookshot.OnBeforeExecution` returning
-`AskExecution(...)` is rewritten to `Deny` on Codex so policies that require
-user confirmation aren't silently bypassed. The platform-level `codex.Ask`
-helper still emits `"ask"` in the JSON for forward-compat testing.
+`permissionDecision: "ask"` is parsed but currently fails open.
+`hookshot.OnBeforeExecution` returning `AskExecution(...)` is rewritten to
+`Deny` on Codex so policies that require user confirmation aren't silently
+bypassed. The platform-level `codex.Ask` helper still emits `"ask"` in the
+JSON for forward-compat testing. If you want to react when Codex is
+actually about to prompt the user, register a separate handler for the
+**PermissionRequest** event below — that event's enforcement is supported.
 
-If you want to react when Codex is actually about to prompt the user,
-register a separate handler for the **PermissionRequest** event below — that
-event's enforcement is supported.
+**`updatedInput`, `continue: false`, `stopReason`, and `suppressOutput`
+fail closed** — Codex rejects the whole hook output with
+`PreToolUse hook returned unsupported <field>` rather than ignoring the
+field, so these must be omitted. Concretely, this means:
+
+- `codex.Allow(reason)`, `codex.Deny(reason)`, and `codex.PassThrough()`
+  are all safe on Codex.
+- `codex.AllowSilent()` is **not safe**: it sets `suppressOutput: true`,
+  which Codex rejects. Use `codex.PassThrough()` for an empty
+  no-side-effects allow.
+- `codex.AllowWithInput(reason, input)` is **not safe**: it sets
+  `updatedInput`, which Codex rejects. There's no Codex-supported way to
+  mutate `tool_input` from a PreToolUse hook today — fall back to
+  injecting state through `additionalContext` instead.
+- To attach model-visible context to an allow, return
+  `codex.AllowWithContext(reason, context)` (or build the output by hand
+  with `hookSpecificOutput.additionalContext`).
+
+The hookshot unified bridge already strips `suppressOutput` from Codex
+`OnBeforeExecution(AllowExecution())` outputs, but if you call the
+platform-level helpers directly you need to pick safe ones yourself.
 
 ## PermissionRequest (Codex-only)
 

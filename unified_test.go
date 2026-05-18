@@ -840,6 +840,41 @@ func TestCodexPreToolUse_AskFailsClosed(t *testing.T) {
 	}
 }
 
+func TestCodexPreToolUse_AllowDoesNotEmitSuppressOutput(t *testing.T) {
+	// Codex rejects suppressOutput with "PreToolUse hook returned unsupported
+	// suppressOutput", so the Codex pre-tool-use bridge must NOT use
+	// claude.AllowSilent (which sets suppressOutput: true) when translating
+	// an Allow decision with no reason. PassThrough (empty {}) is the right
+	// shape — Codex treats an empty output as success.
+	ClearHandlers()
+	defer ClearHandlers()
+
+	OnBeforeExecution(func(ctx ExecutionContext) ExecutionDecision {
+		return AllowExecution()
+	})
+
+	stdinR, stdinW, _ := os.Pipe()
+	stdinW.Write([]byte(`{"session_id":"s","tool_name":"Bash","tool_input":{"command":"echo hi"},"cwd":"/tmp"}`))
+	stdinW.Close()
+	stdoutR, stdoutW, _ := os.Pipe()
+	origStdin, origStdout := os.Stdin, os.Stdout
+	os.Stdin, os.Stdout = stdinR, stdoutW
+	defer func() {
+		stdoutW.Close()
+		os.Stdin, os.Stdout = origStdin, origStdout
+	}()
+
+	handlers["codex-pre-tool-use"]()
+	stdoutW.Close()
+
+	var buf bytes.Buffer
+	buf.ReadFrom(stdoutR)
+	got := buf.String()
+	if strings.Contains(got, "suppressOutput") {
+		t.Errorf("Codex Allow decision must not emit suppressOutput, got %q", got)
+	}
+}
+
 func TestCodexPreToolUse_ApplyPatchPopulatesCommand(t *testing.T) {
 	// For apply_patch, the unified handler should pull tool_input.command
 	// out as ExecutionContext.Command so policies can inspect the patch.
