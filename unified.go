@@ -729,24 +729,108 @@ func OnAfterFileEdit(handler FileEditHandler) {
 	})
 
 	// Codex PostToolUse (same JSON protocol as Claude Code).
-	// Codex uses apply_patch in addition to Write/Edit; apply_patch carries
-	// a unified-diff envelope under tool_input.command that may touch
-	// multiple files in a single call. For each file in the patch we invoke
-	// the user's handler exactly once with a populated FileEditContext, and
-	// we combine the decisions across files: a Block from any file wins,
-	// otherwise context strings are concatenated. The parser used here is
-	// also exported as codex.ParseApplyPatch for callers that want raw
-	// access. Configure the hook with matcher "apply_patch|mcp__.*" in
+	//
+	// Codex emits file edits in three shapes:
+	//   1. Write / Edit  — Claude-style tool_input with file_path + content
+	//                      or old_string/new_string. Native first-class tools.
+	//   2. apply_patch   — tool_input.command holds a unified-diff envelope
+	//                      that may touch multiple files in a single call.
+	//   3. Bash          — tool_input.command holds `apply_patch <<'PATCH'
+	//                      … PATCH` (sometimes with an absolute path to a
+	//                      per-session apply_patch shim). Codex routes file
+	//                      edits this way at least as often as (2). Without
+	//                      handling this case the SecurityScanResults dash
+	//                      stayed empty for every Codex session because no
+	//                      afterFileEdit telemetry was ever emitted.
+	//
+	// For (2) and (3) we run the patch through codex.ParseApplyPatch and
+	// invoke the user's handler exactly once per file in the envelope, then
+	// reduce the per-file decisions: a Block from any file wins, otherwise
+	// context strings are concatenated. The parser is also exported as
+	// codex.ParseApplyPatch / codex.ParseApplyPatchFromBash for callers
+	// that want raw access.
+	//
+	// Configure the hook with matcher "Bash|apply_patch|mcp__.*" in
 	// hooks.json — "Edit" and "Write" matcher aliases exist but are
-	// redundant with "apply_patch".
+	// redundant with "apply_patch", and "Bash" is required to catch the
+	// heredoc shape.
 	Register("codex-post-tool-use", func() {
 		Run(func(input codex.PostToolUseInput) codex.PostToolUseOutput {
-			if input.ToolName != "Write" && input.ToolName != "Edit" && input.ToolName != "apply_patch" {
+			// dispatchPatch invokes handler once per file in the patch
+			// envelope, then reduces per-file decisions to one
+			// PostToolUseOutput. fallbackCommand is used as the
+			// NewString of a single synthetic FileEdit when the patch
+			// could not be parsed (len(files)==0), so policies still
+			// see a Codex PostToolUse event rather than nothing.
+			dispatchPatch := func(files []codex.PatchFile, fallbackCommand string) codex.PostToolUseOutput {
+				if len(files) == 0 {
+					ctx := FileEditContext{
+						Platform:      PlatformCodex,
+						SessionID:     input.SessionID,
+						Cwd:           input.Cwd,
+						Edits:         []FileEdit{{OldString: "", NewString: fallbackCommand}},
+						RawClaudeCode: &input,
+					}
+					decision := handler(ctx)
+					if decision.Block {
+						return codex.PostToolBlock(decision.Reason)
+					}
+					if decision.Context != "" {
+						return codex.PostToolContext(decision.Context)
+					}
+					return codex.PostToolOK()
+				}
+
+				var (
+					blockReasons []string
+					contexts     []string
+				)
+				invoke := func(filePath string, f codex.PatchFile) {
+					edits := make([]FileEdit, 0, len(f.Edits))
+					for _, e := range f.Edits {
+						edits = append(edits, FileEdit{OldString: e.OldString, NewString: e.NewString})
+					}
+					ctx := FileEditContext{
+						Platform:      PlatformCodex,
+						SessionID:     input.SessionID,
+						FilePath:      filePath,
+						NewFilePath:   f.NewFilePath,
+						Edits:         edits,
+						Cwd:           input.Cwd,
+						RawClaudeCode: &input,
+					}
+					decision := handler(ctx)
+					if decision.Block {
+						blockReasons = append(blockReasons, decision.Reason)
+					} else if decision.Context != "" {
+						contexts = append(contexts, decision.Context)
+					}
+				}
+				for _, f := range files {
+					// Always invoke for the declared source path.
+					invoke(f.FilePath, f)
+					// For renames, invoke again with the destination so
+					// policies that only inspect ctx.FilePath cannot be
+					// bypassed by a "*** Move to:" pointing at a
+					// sensitive path (e.g. "../../.ssh/authorized_keys").
+					// NewFilePath is populated on both invocations so
+					// policies that want to detect the rename
+					// relationship can.
+					if f.NewFilePath != "" && f.NewFilePath != f.FilePath {
+						invoke(f.NewFilePath, f)
+					}
+				}
+				if len(blockReasons) > 0 {
+					return codex.PostToolBlock(strings.Join(blockReasons, "\n"))
+				}
+				if len(contexts) > 0 {
+					return codex.PostToolContext(strings.Join(contexts, "\n"))
+				}
 				return codex.PostToolOK()
 			}
 
-			// Write/Edit use the Claude-style schema.
-			if input.ToolName == "Write" || input.ToolName == "Edit" {
+			switch input.ToolName {
+			case "Write", "Edit":
 				var toolInput struct {
 					FilePath  string `json:"file_path"`
 					Content   string `json:"content"`
@@ -779,82 +863,34 @@ func OnAfterFileEdit(handler FileEditHandler) {
 					return codex.PostToolContext(decision.Context)
 				}
 				return codex.PostToolOK()
-			}
 
-			// apply_patch: tool_input is {"command": "*** Begin Patch ..."}.
-			var applyInput struct {
-				Command string `json:"command"`
-			}
-			json.Unmarshal(input.ToolInput, &applyInput)
+			case "apply_patch":
+				var applyInput struct {
+					Command string `json:"command"`
+				}
+				json.Unmarshal(input.ToolInput, &applyInput)
+				return dispatchPatch(codex.ParseApplyPatch(applyInput.Command), applyInput.Command)
 
-			files := codex.ParseApplyPatch(applyInput.Command)
-			if len(files) == 0 {
-				// We could not parse anything actionable out of the patch.
-				// Fall back to invoking the handler once with whatever raw
-				// information we have so policies still see a Codex
-				// PostToolUse event rather than nothing.
-				ctx := FileEditContext{
-					Platform:      PlatformCodex,
-					SessionID:     input.SessionID,
-					Cwd:           input.Cwd,
-					Edits:         []FileEdit{{OldString: "", NewString: applyInput.Command}},
-					RawClaudeCode: &input,
+			case "Bash":
+				// Codex routes most file edits through Bash:
+				//   `apply_patch <<'PATCH' … PATCH`
+				// Detection lives in codex.ParseApplyPatchFromBash so
+				// non-edit Bash commands short-circuit cheaply. If the
+				// command IS an apply_patch invocation, dispatch through
+				// the same per-file pipeline as case "apply_patch".
+				var bashInput struct {
+					Command string `json:"command"`
 				}
-				decision := handler(ctx)
-				if decision.Block {
-					return codex.PostToolBlock(decision.Reason)
+				json.Unmarshal(input.ToolInput, &bashInput)
+				files, ok := codex.ParseApplyPatchFromBash(bashInput.Command)
+				if !ok {
+					return codex.PostToolOK()
 				}
-				if decision.Context != "" {
-					return codex.PostToolContext(decision.Context)
-				}
+				return dispatchPatch(files, bashInput.Command)
+
+			default:
 				return codex.PostToolOK()
 			}
-
-			var (
-				blockReasons []string
-				contexts     []string
-			)
-			invoke := func(filePath string, f codex.PatchFile) {
-				edits := make([]FileEdit, 0, len(f.Edits))
-				for _, e := range f.Edits {
-					edits = append(edits, FileEdit{OldString: e.OldString, NewString: e.NewString})
-				}
-				ctx := FileEditContext{
-					Platform:      PlatformCodex,
-					SessionID:     input.SessionID,
-					FilePath:      filePath,
-					NewFilePath:   f.NewFilePath,
-					Edits:         edits,
-					Cwd:           input.Cwd,
-					RawClaudeCode: &input,
-				}
-				decision := handler(ctx)
-				if decision.Block {
-					blockReasons = append(blockReasons, decision.Reason)
-				} else if decision.Context != "" {
-					contexts = append(contexts, decision.Context)
-				}
-			}
-			for _, f := range files {
-				// Always invoke for the declared source path.
-				invoke(f.FilePath, f)
-				// For renames, invoke again with the destination so policies
-				// that only inspect ctx.FilePath cannot be bypassed by a
-				// "*** Move to:" pointing at a sensitive path (e.g.
-				// "../../.ssh/authorized_keys"). NewFilePath is populated on
-				// both invocations so policies that want to detect the
-				// rename relationship can.
-				if f.NewFilePath != "" && f.NewFilePath != f.FilePath {
-					invoke(f.NewFilePath, f)
-				}
-			}
-			if len(blockReasons) > 0 {
-				return codex.PostToolBlock(strings.Join(blockReasons, "\n"))
-			}
-			if len(contexts) > 0 {
-				return codex.PostToolContext(strings.Join(contexts, "\n"))
-			}
-			return codex.PostToolOK()
 		})
 	})
 }

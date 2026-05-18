@@ -1129,6 +1129,164 @@ func TestCodexPostToolUse_ApplyPatchBlockPropagates(t *testing.T) {
 	}
 }
 
+// ---------------------------------------------------------------------------
+// Codex Bash → apply_patch heredoc bridging
+// ---------------------------------------------------------------------------
+// These tests cover the case where Codex routes a file edit through a Bash
+// `apply_patch <<'PATCH' … PATCH` invocation instead of a first-class
+// tool_name="apply_patch" call. The unified bridge must detect that shape
+// and dispatch through OnAfterFileEdit identically to the native path —
+// otherwise SecurityScanResults never get populated for Codex sessions and
+// the analytics dashboard shows zero stop-hook security checks.
+
+func TestCodexPostToolUse_BashApplyPatchHeredocDispatches(t *testing.T) {
+	ClearHandlers()
+	defer ClearHandlers()
+
+	var got []FileEditContext
+	OnAfterFileEdit(func(ctx FileEditContext) FileEditDecision {
+		got = append(got, ctx)
+		return FileEditOK()
+	})
+
+	// Multi-file patch wrapped in a real-shape Codex Bash heredoc. The \\n
+	// sequences become literal newlines after JSON decoding so the parser
+	// sees the same line breaks Codex would emit.
+	cmd := "apply_patch <<'PATCH'\\n" +
+		"*** Begin Patch\\n" +
+		"*** Add File: secrets/api_key.txt\\n" +
+		"+sk-deadbeef\\n" +
+		"*** Update File: src/auth.go\\n" +
+		"@@\\n" +
+		"-old\\n" +
+		"+new\\n" +
+		"*** End Patch\\n" +
+		"PATCH"
+	stdin := `{"session_id":"s","tool_name":"Bash","tool_input":{"command":"` + cmd + `"},"cwd":"/repo"}`
+	runHandlerWithStdin(t, "codex-post-tool-use", stdin)
+
+	if len(got) != 2 {
+		t.Fatalf("handler invocations = %d, want 2 (one per file in patch); got=%+v", len(got), got)
+	}
+	if got[0].FilePath != "secrets/api_key.txt" {
+		t.Errorf("got[0].FilePath = %q, want %q", got[0].FilePath, "secrets/api_key.txt")
+	}
+	if got[1].FilePath != "src/auth.go" {
+		t.Errorf("got[1].FilePath = %q, want %q", got[1].FilePath, "src/auth.go")
+	}
+	for _, c := range got {
+		if c.Platform != PlatformCodex {
+			t.Errorf("Platform = %q, want %q", c.Platform, PlatformCodex)
+		}
+		if c.Cwd != "/repo" {
+			t.Errorf("Cwd = %q, want %q", c.Cwd, "/repo")
+		}
+		if c.SessionID != "s" {
+			t.Errorf("SessionID = %q, want %q", c.SessionID, "s")
+		}
+	}
+	wantEdit := FileEdit{OldString: "old", NewString: "new"}
+	if len(got[1].Edits) != 1 || got[1].Edits[0] != wantEdit {
+		t.Errorf("got[1].Edits = %+v, want [%+v]", got[1].Edits, wantEdit)
+	}
+}
+
+func TestCodexPostToolUse_BashApplyPatchAbsolutePathBinaryDispatches(t *testing.T) {
+	// Codex sometimes invokes a per-session apply_patch shim by absolute
+	// path (observed in hook_events.data for real sessions). The bridge
+	// must still recognize this as an apply_patch invocation.
+	ClearHandlers()
+	defer ClearHandlers()
+
+	var got []FileEditContext
+	OnAfterFileEdit(func(ctx FileEditContext) FileEditDecision {
+		got = append(got, ctx)
+		return FileEditOK()
+	})
+
+	cmd := "/Users/me/.codex/tmp/arg0/codex-arg0IuQk4E/apply_patch <<'PATCH'\\n" +
+		"*** Begin Patch\\n" +
+		"*** Add File: foo.txt\\n" +
+		"+hi\\n" +
+		"*** End Patch\\n" +
+		"PATCH"
+	stdin := `{"session_id":"s","tool_name":"Bash","tool_input":{"command":"` + cmd + `"},"cwd":"/repo"}`
+	runHandlerWithStdin(t, "codex-post-tool-use", stdin)
+
+	if len(got) != 1 || got[0].FilePath != "foo.txt" {
+		t.Fatalf("got = %+v, want one invocation with FilePath=foo.txt", got)
+	}
+}
+
+func TestCodexPostToolUse_BashNonApplyPatchCommandSkipped(t *testing.T) {
+	// A normal Bash command must not trigger the file-edit handler.
+	// Otherwise every `ls`, `git status`, `cat`, etc. emitted by Codex
+	// would be misclassified as a file edit, flooding the security
+	// scanner with garbage events.
+	ClearHandlers()
+	defer ClearHandlers()
+
+	invoked := 0
+	OnAfterFileEdit(func(FileEditContext) FileEditDecision {
+		invoked++
+		return FileEditOK()
+	})
+
+	stdin := `{"session_id":"s","tool_name":"Bash","tool_input":{"command":"ls -la /tmp"},"cwd":"/repo"}`
+	runHandlerWithStdin(t, "codex-post-tool-use", stdin)
+
+	if invoked != 0 {
+		t.Errorf("handler invoked %d times for plain Bash command, want 0", invoked)
+	}
+}
+
+func TestCodexPostToolUse_BashApplyPatchBlockPropagates(t *testing.T) {
+	// A blocking decision from the user's handler on a Bash-heredoc
+	// apply_patch must emit PostToolBlock so Codex surfaces the feedback,
+	// identically to the native apply_patch path.
+	ClearHandlers()
+	defer ClearHandlers()
+
+	OnAfterFileEdit(func(ctx FileEditContext) FileEditDecision {
+		if strings.Contains(ctx.FilePath, "secrets") {
+			return FileEditBlock("contains secrets")
+		}
+		return FileEditOK()
+	})
+
+	cmd := "apply_patch <<'PATCH'\\n" +
+		"*** Begin Patch\\n" +
+		"*** Add File: secrets/key.txt\\n" +
+		"+sk-deadbeef\\n" +
+		"*** End Patch\\n" +
+		"PATCH"
+	stdin := `{"session_id":"s","tool_name":"Bash","tool_input":{"command":"` + cmd + `"},"cwd":"/repo"}`
+
+	stdinR, stdinW, _ := os.Pipe()
+	stdinW.Write([]byte(stdin))
+	stdinW.Close()
+	stdoutR, stdoutW, _ := os.Pipe()
+	origStdin, origStdout := os.Stdin, os.Stdout
+	os.Stdin, os.Stdout = stdinR, stdoutW
+	defer func() {
+		stdoutW.Close()
+		os.Stdin, os.Stdout = origStdin, origStdout
+	}()
+
+	handlers["codex-post-tool-use"]()
+	stdoutW.Close()
+
+	var buf bytes.Buffer
+	buf.ReadFrom(stdoutR)
+	out := buf.String()
+	if !strings.Contains(out, `"decision":"block"`) {
+		t.Errorf("expected PostToolBlock JSON output, got %q", out)
+	}
+	if !strings.Contains(out, "contains secrets") {
+		t.Errorf("expected block reason to be present, got %q", out)
+	}
+}
+
 func TestOnStop_CursorEmptyWorkspaceRootsLeavesCwdEmpty(t *testing.T) {
 	ClearHandlers()
 	defer ClearHandlers()

@@ -1,6 +1,17 @@
 package codex
 
-import "strings"
+import (
+	"regexp"
+	"strings"
+)
+
+// applyPatchInvocationRE matches an `apply_patch` invocation followed by a
+// heredoc operator (`<<`, `<<-`, or quoted variants). Requiring the heredoc
+// operator — instead of accepting any substring match — prevents the
+// detector from firing on benign Bash commands that merely mention
+// `apply_patch` (filenames, documentation, log lines). The optional `-` and
+// whitespace handling cover the variants Codex actually emits in the wild.
+var applyPatchInvocationRE = regexp.MustCompile(`(?:^|[/\s;&|])apply_patch[ \t]+<<-?`)
 
 // PatchEdit captures one removed/added pair inside an apply_patch hunk.
 //
@@ -151,4 +162,45 @@ func ParseApplyPatch(patch string) []PatchFile {
 	}
 	flushFile()
 	return files
+}
+
+// ParseApplyPatchFromBash inspects a Codex Bash tool command and, if the
+// command is an apply_patch heredoc invocation, returns the parsed patch
+// files. The second return value reports whether the command was an
+// apply_patch invocation so callers can short-circuit on plain Bash
+// commands without paying for a full parse pass.
+//
+// Codex routes file edits through Bash heredocs of the form
+//
+//	apply_patch <<'PATCH'
+//	*** Begin Patch
+//	... unified diff envelope ...
+//	*** End Patch
+//	PATCH
+//
+// at least as often as it emits a first-class tool_name="apply_patch" call.
+// Codex may also invoke a per-session shim binary, so the apply_patch token
+// can appear with an absolute path prefix, e.g.
+// `/Users/me/.codex/tmp/arg0/codex-arg0IuQk4E/apply_patch <<'PATCH' ...`.
+// Without this helper, callers that only inspect tool_name silently miss
+// every heredoc-style edit (which is why Codex sessions showed up in the
+// dashboard with zero SecurityScanResult rows even though file edits had
+// clearly happened).
+//
+// Detection is heuristic but tight: the command must contain the
+// "*** Begin Patch" envelope marker AND an `apply_patch <<HEREDOC`
+// invocation must appear somewhere before that marker. Requiring the
+// heredoc operator rules out false positives where `apply_patch` only
+// appears in a filename, comment, or doc string (e.g.
+// `cat > docs/apply_patch_format.md <<EOF ... *** Begin Patch ... EOF`).
+func ParseApplyPatchFromBash(command string) ([]PatchFile, bool) {
+	envelopeStart := strings.Index(command, "*** Begin Patch")
+	if envelopeStart < 0 {
+		return nil, false
+	}
+	prefix := command[:envelopeStart]
+	if !applyPatchInvocationRE.MatchString(prefix) {
+		return nil, false
+	}
+	return ParseApplyPatch(command), true
 }
