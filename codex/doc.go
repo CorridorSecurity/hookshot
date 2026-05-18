@@ -29,7 +29,7 @@
 //	    ],
 //	    "PostToolUse": [
 //	      {
-//	        "matcher": "apply_patch|mcp__.*",
+//	        "matcher": "Bash|apply_patch|mcp__.*",
 //	        "hooks": [{ "type": "command", "command": "/path/to/hook codex-post-tool-use" }]
 //	      }
 //	    ],

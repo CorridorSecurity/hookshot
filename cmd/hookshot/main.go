@@ -502,7 +502,15 @@ func installCodex(binaryPath string) error {
 			}},
 		}},
 		"PostToolUse": []map[string]any{{
-			"matcher": "apply_patch|mcp__.*",
+			// Bash is required to catch the heredoc-style file edits
+			// (`apply_patch <<'PATCH' … PATCH`) and greenfield writes
+			// (`cat <<'EOF' > FILE … EOF`) Codex 0.130.0+ routes
+			// through plain Bash in addition to the apply_patch tool. The
+			// unified codex-post-tool-use bridge parses both shapes via
+			// codex.ParseApplyPatchFromBash / codex.ParseBashRedirectWrite
+			// — but only sees the events if the matcher itself lets
+			// them through.
+			"matcher": "Bash|apply_patch|mcp__.*",
 			"hooks": []map[string]any{{
 				"type":    "command",
 				"command": binaryPath + " codex-post-tool-use",
@@ -542,11 +550,11 @@ func installCascade(binaryPath string) error {
 	// Build hooks config
 	config := map[string]any{
 		"hooks": map[string]any{
-			"pre_run_command":         []map[string]any{{"command": binaryPath + " cascade-pre-run-command"}},
-			"pre_mcp_tool_use":        []map[string]any{{"command": binaryPath + " cascade-pre-mcp-tool-use"}},
-			"pre_user_prompt":         []map[string]any{{"command": binaryPath + " cascade-pre-user-prompt"}},
-			"post_write_code":         []map[string]any{{"command": binaryPath + " cascade-post-write-code"}},
-			"post_cascade_response":   []map[string]any{{"command": binaryPath + " cascade-post-cascade-response"}},
+			"pre_run_command":       []map[string]any{{"command": binaryPath + " cascade-pre-run-command"}},
+			"pre_mcp_tool_use":      []map[string]any{{"command": binaryPath + " cascade-pre-mcp-tool-use"}},
+			"pre_user_prompt":       []map[string]any{{"command": binaryPath + " cascade-pre-user-prompt"}},
+			"post_write_code":       []map[string]any{{"command": binaryPath + " cascade-post-write-code"}},
+			"post_cascade_response": []map[string]any{{"command": binaryPath + " cascade-post-cascade-response"}},
 		},
 	}
 

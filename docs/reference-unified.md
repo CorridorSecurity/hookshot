@@ -187,7 +187,7 @@ Handles post-file-edit events.
 
 **Registers:** `claude-after-file-edit`, `cursor-after-file-edit`, `droid-after-file-edit`, `cascade-post-write-code`, `codex-post-tool-use`
 
-For Codex, the underlying PostToolUse handler matches `apply_patch` (which is how Codex performs all file edits). Configure the hook with `matcher: "apply_patch|mcp__.*"` in `~/.codex/hooks.json`.
+For Codex, the underlying PostToolUse handler must match `Bash` in addition to `apply_patch`: Codex 0.130.0+ routes greenfield writes through `cat <<'EOF' > FILE` and edits through `apply_patch <<'PATCH'` heredocs — both shapes ride a `tool_name="Bash"` PostToolUse, parsed by `codex.ParseBashRedirectWrite` and `codex.ParseApplyPatchFromBash` respectively. Configure the hook with `matcher: "Bash|apply_patch|mcp__.*"` in `~/.codex/hooks.json`.
 
 For Codex `apply_patch`, the unified bridge parses the unified-diff envelope in `tool_input.command` and invokes your handler **once per file** in the patch, with `FilePath` set to the file declared in the `*** Add/Update/Delete File:` header and `Edits` populated from each hunk. If any of those invocations returns `FileEditBlock`, the reasons are concatenated and emitted as a single `PostToolBlock`.
 
