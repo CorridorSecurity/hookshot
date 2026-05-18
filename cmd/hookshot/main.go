@@ -302,7 +302,10 @@ Flags:`)
 }
 
 func installClaude(binaryPath string) error {
-	homeDir, _ := os.UserHomeDir()
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("resolving home directory: %w", err)
+	}
 	configPath := filepath.Join(homeDir, ".claude", "settings.json")
 
 	fmt.Printf("Installing to Claude Code (%s)...\n", configPath)
@@ -367,7 +370,10 @@ func installClaude(binaryPath string) error {
 }
 
 func installCursor(binaryPath string) error {
-	homeDir, _ := os.UserHomeDir()
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("resolving home directory: %w", err)
+	}
 	configPath := filepath.Join(homeDir, ".cursor", "hooks.json")
 
 	fmt.Printf("Installing to Cursor (%s)...\n", configPath)
@@ -402,7 +408,10 @@ func installCursor(binaryPath string) error {
 }
 
 func installDroid(binaryPath string) error {
-	homeDir, _ := os.UserHomeDir()
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("resolving home directory: %w", err)
+	}
 	configPath := filepath.Join(homeDir, ".factory", "settings.json")
 
 	fmt.Printf("Installing to Factory Droid (%s)...\n", configPath)
@@ -467,7 +476,10 @@ func installDroid(binaryPath string) error {
 }
 
 func installCodex(binaryPath string) error {
-	homeDir, _ := os.UserHomeDir()
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("resolving home directory: %w", err)
+	}
 	configPath := filepath.Join(homeDir, ".codex", "hooks.json")
 
 	fmt.Printf("Installing to OpenAI Codex (%s)...\n", configPath)
@@ -542,7 +554,10 @@ func installCodex(binaryPath string) error {
 }
 
 func installCascade(binaryPath string) error {
-	homeDir, _ := os.UserHomeDir()
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("resolving home directory: %w", err)
+	}
 	configPath := filepath.Join(homeDir, ".codeium", "windsurf", "hooks.json")
 
 	fmt.Printf("Installing to Windsurf Cascade (%s)...\n", configPath)
