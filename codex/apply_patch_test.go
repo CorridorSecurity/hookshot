@@ -313,3 +313,157 @@ func TestParseApplyPatchFromBash_HeredocVariants(t *testing.T) {
 		}
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Regression tests for two bypasses of the previous regex+strings.Index
+// detector. The AST-based implementation closes both. See the doc comment
+// on ParseApplyPatchFromBash for the full attack description.
+
+func TestParseApplyPatchFromBash_DecoyMarkerBeforeRealInvocation(t *testing.T) {
+	// Previously: strings.Index anchored on the decoy `*** Begin Patch`
+	// inside the printf string, so the regex's prefix was just
+	// `printf '` and detection returned ok=false — the real apply_patch
+	// heredoc below was silently dispatched as a plain Bash command,
+	// bypassing OnAfterFileEdit policies entirely.
+	cmd := "printf '*** Begin Patch\\n' >/dev/null; apply_patch <<'PATCH'\n" +
+		"*** Begin Patch\n" +
+		"*** Add File: /sensitive/path\n" +
+		"+malicious content\n" +
+		"*** End Patch\n" +
+		"PATCH"
+
+	files, ok := ParseApplyPatchFromBash(cmd)
+	if !ok {
+		t.Fatal("decoy-marker bypass: ParseApplyPatchFromBash returned ok=false, want true")
+	}
+	if len(files) != 1 || files[0].FilePath != "/sensitive/path" || files[0].Operation != "add" {
+		t.Errorf("files = %+v, want one add for /sensitive/path", files)
+	}
+}
+
+func TestParseApplyPatchFromBash_ZeroSpaceBeforeHeredoc(t *testing.T) {
+	// Previously: the regex required `apply_patch[ \t]+<<`, so the
+	// zero-space `apply_patch<<'PATCH'` (valid Bash) evaded detection.
+	cmd := "apply_patch<<'PATCH'\n" +
+		"*** Begin Patch\n" +
+		"*** Add File: /tmp/zero-space.txt\n" +
+		"+hi\n" +
+		"*** End Patch\n" +
+		"PATCH"
+
+	files, ok := ParseApplyPatchFromBash(cmd)
+	if !ok {
+		t.Fatal("zero-space heredoc: ParseApplyPatchFromBash returned ok=false, want true")
+	}
+	if len(files) != 1 || files[0].FilePath != "/tmp/zero-space.txt" {
+		t.Errorf("files = %+v, want one add for /tmp/zero-space.txt", files)
+	}
+}
+
+func TestParseApplyPatchFromBash_ZeroSpaceDashHeredoc(t *testing.T) {
+	// Combine the two edge cases: no space before <<-, and DashHdoc
+	// (tab-stripping) semantics. The detector must apply POSIX
+	// tab-stripping to the body before handing it to ParseApplyPatch,
+	// otherwise the leading tabs would prevent the `*** Begin Patch`
+	// line prefix match.
+	cmd := "apply_patch<<-PATCH\n" +
+		"\t*** Begin Patch\n" +
+		"\t*** Add File: a.txt\n" +
+		"\t+x\n" +
+		"\t*** End Patch\n" +
+		"\tPATCH"
+
+	files, ok := ParseApplyPatchFromBash(cmd)
+	if !ok {
+		t.Fatal("zero-space <<-PATCH: ParseApplyPatchFromBash returned ok=false, want true")
+	}
+	if len(files) != 1 || files[0].FilePath != "a.txt" {
+		t.Errorf("files = %+v, want one add for a.txt", files)
+	}
+}
+
+func TestParseApplyPatchFromBash_MultipleInvocations(t *testing.T) {
+	// Two apply_patch invocations chained with `;` — both should be
+	// parsed and their files concatenated in source order. This guards
+	// against a future refactor that "first-match wins" silently drops
+	// edits from later invocations.
+	cmd := "apply_patch <<'A'\n" +
+		"*** Begin Patch\n" +
+		"*** Add File: first.txt\n" +
+		"+1\n" +
+		"*** End Patch\n" +
+		"A\n" +
+		"apply_patch <<'B'\n" +
+		"*** Begin Patch\n" +
+		"*** Add File: second.txt\n" +
+		"+2\n" +
+		"*** End Patch\n" +
+		"B"
+
+	files, ok := ParseApplyPatchFromBash(cmd)
+	if !ok {
+		t.Fatal("multi-invocation: ParseApplyPatchFromBash returned ok=false, want true")
+	}
+	if len(files) != 2 {
+		t.Fatalf("len(files) = %d, want 2 (one per invocation)", len(files))
+	}
+	if files[0].FilePath != "first.txt" {
+		t.Errorf("files[0].FilePath = %q, want first.txt", files[0].FilePath)
+	}
+	if files[1].FilePath != "second.txt" {
+		t.Errorf("files[1].FilePath = %q, want second.txt", files[1].FilePath)
+	}
+}
+
+func TestParseApplyPatchFromBash_InvocationInsideSubshell(t *testing.T) {
+	// `( ... )` runs the inner commands in a subshell. The AST walker
+	// must descend into the subshell so the apply_patch invocation is
+	// still detected — otherwise an agent could nest its real
+	// invocation inside `()` to evade the detector.
+	cmd := "(apply_patch <<'PATCH'\n" +
+		"*** Begin Patch\n" +
+		"*** Add File: nested.txt\n" +
+		"+x\n" +
+		"*** End Patch\n" +
+		"PATCH\n)"
+
+	files, ok := ParseApplyPatchFromBash(cmd)
+	if !ok {
+		t.Fatal("subshell-nested apply_patch: returned ok=false, want true")
+	}
+	if len(files) != 1 || files[0].FilePath != "nested.txt" {
+		t.Errorf("files = %+v, want one add for nested.txt", files)
+	}
+}
+
+func TestParseApplyPatchFromBash_ApplyPatchTokenInsideStringSkipped(t *testing.T) {
+	// `apply_patch` appears only inside a single-quoted argument to
+	// echo — not as a command. The AST identifies the invocation as
+	// `echo`, so detection must return ok=false.
+	cmd := "echo 'apply_patch <<EOF *** Begin Patch *** End Patch EOF'"
+	if _, ok := ParseApplyPatchFromBash(cmd); ok {
+		t.Error("apply_patch inside echo string wrongly detected as invocation")
+	}
+}
+
+func TestParseApplyPatchFromBash_MalformedBashRejected(t *testing.T) {
+	// A command that fails to parse as Bash (unterminated quote) must
+	// be rejected rather than fall back to a less-safe heuristic. The
+	// safe default is "no detection" — the post-tool handler will
+	// short-circuit to PostToolOK and the policy gets to decide based
+	// on other signals.
+	cmd := "apply_patch <<'PATCH\n*** Begin Patch\n+x\n*** End Patch\nPATCH"
+	if _, ok := ParseApplyPatchFromBash(cmd); ok {
+		t.Error("malformed Bash wrongly accepted by detector")
+	}
+}
+
+func TestParseApplyPatchFromBash_NonHeredocInvocationSkipped(t *testing.T) {
+	// `apply_patch` invoked with a file argument (no heredoc) is not
+	// the shape Codex uses for in-band patches and we can't extract a
+	// body, so it must not be classified as a heredoc invocation. The
+	// first-class tool_name="apply_patch" path handles other shapes.
+	if _, ok := ParseApplyPatchFromBash("apply_patch ./some-file.patch"); ok {
+		t.Error("apply_patch without heredoc wrongly detected as heredoc invocation")
+	}
+}

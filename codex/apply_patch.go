@@ -1,17 +1,10 @@
 package codex
 
 import (
-	"regexp"
 	"strings"
-)
 
-// applyPatchInvocationRE matches an `apply_patch` invocation followed by a
-// heredoc operator (`<<`, `<<-`, or quoted variants). Requiring the heredoc
-// operator — instead of accepting any substring match — prevents the
-// detector from firing on benign Bash commands that merely mention
-// `apply_patch` (filenames, documentation, log lines). The optional `-` and
-// whitespace handling cover the variants Codex actually emits in the wild.
-var applyPatchInvocationRE = regexp.MustCompile(`(?:^|[/\s;&|])apply_patch[ \t]+<<-?`)
+	"mvdan.cc/sh/v3/syntax"
+)
 
 // PatchEdit captures one removed/added pair inside an apply_patch hunk.
 //
@@ -164,11 +157,11 @@ func ParseApplyPatch(patch string) []PatchFile {
 	return files
 }
 
-// ParseApplyPatchFromBash inspects a Codex Bash tool command and, if the
-// command is an apply_patch heredoc invocation, returns the parsed patch
-// files. The second return value reports whether the command was an
-// apply_patch invocation so callers can short-circuit on plain Bash
-// commands without paying for a full parse pass.
+// ParseApplyPatchFromBash inspects a Codex Bash tool command and, if it
+// invokes apply_patch with a heredoc body, returns the parsed patch
+// files. The second return value reports whether at least one
+// apply_patch heredoc invocation was found, so callers can short-circuit
+// on plain Bash commands without parsing the patch envelope.
 //
 // Codex routes file edits through Bash heredocs of the form
 //
@@ -187,20 +180,144 @@ func ParseApplyPatch(patch string) []PatchFile {
 // dashboard with zero SecurityScanResult rows even though file edits had
 // clearly happened).
 //
-// Detection is heuristic but tight: the command must contain the
-// "*** Begin Patch" envelope marker AND an `apply_patch <<HEREDOC`
-// invocation must appear somewhere before that marker. Requiring the
-// heredoc operator rules out false positives where `apply_patch` only
-// appears in a filename, comment, or doc string (e.g.
-// `cat > docs/apply_patch_format.md <<EOF ... *** Begin Patch ... EOF`).
+// Implementation note: detection runs the command through a real Bash
+// parser (mvdan.cc/sh/v3/syntax) and walks the AST looking for a
+// CallExpr whose first Word is the literal `apply_patch` (or
+// `*/apply_patch` for the per-session shim) paired with a heredoc
+// redirect (`<<DELIM` or `<<-DELIM`, quoted or unquoted) on the same
+// Stmt. This replaced an earlier regex+`strings.Index` heuristic that
+// had two bypasses:
+//
+//  1. A decoy `*** Begin Patch` marker in a preceding command (e.g.
+//     `printf '*** Begin Patch\n' >/dev/null; apply_patch <<'PATCH' ...`)
+//     would anchor `strings.Index` on the decoy, leaving the regex with a
+//     prefix that didn't contain the real `apply_patch <<` invocation —
+//     detection silently returned (nil, false) and the post-tool handler
+//     skipped dispatch entirely.
+//  2. The regex required at least one space between `apply_patch` and
+//     `<<`, so the zero-space `apply_patch<<'PATCH'` (valid Bash) also
+//     evaded detection.
+//
+// A real parser closes both bypasses and also rules out the legacy
+// false-positive case (an `apply_patch` token appearing inside a
+// docs-file heredoc body), because the parser identifies the
+// surrounding command (`cat > docs/apply_patch_format.md <<'EOF'`) as
+// the invocation, not the body content.
+//
+// If a command contains multiple apply_patch heredoc invocations (in
+// pipelines, `;` chains, subshells, conditionals, etc.) every body is
+// parsed and the resulting PatchFile slices are concatenated. If the
+// command is not valid Bash (parser error) this returns (nil, false) —
+// silently treating malformed input as an edit would be unsafe.
 func ParseApplyPatchFromBash(command string) ([]PatchFile, bool) {
-	envelopeStart := strings.Index(command, "*** Begin Patch")
-	if envelopeStart < 0 {
+	file, err := syntax.NewParser().Parse(strings.NewReader(command), "")
+	if err != nil {
 		return nil, false
 	}
-	prefix := command[:envelopeStart]
-	if !applyPatchInvocationRE.MatchString(prefix) {
+
+	var bodies []heredocBody
+	syntax.Walk(file, func(node syntax.Node) bool {
+		stmt, ok := node.(*syntax.Stmt)
+		if !ok {
+			return true
+		}
+		if !stmtInvokesApplyPatch(stmt) {
+			return true
+		}
+		for _, r := range stmt.Redirs {
+			body, ok := heredocBodyFromRedirect(command, r)
+			if ok {
+				bodies = append(bodies, body)
+			}
+		}
+		return true
+	})
+
+	if len(bodies) == 0 {
 		return nil, false
 	}
-	return ParseApplyPatch(command), true
+
+	var all []PatchFile
+	for _, b := range bodies {
+		all = append(all, ParseApplyPatch(b.text)...)
+	}
+	return all, true
+}
+
+// stmtInvokesApplyPatch reports whether stmt's primary command is the
+// apply_patch executable. Accepts the bare `apply_patch` token and the
+// `*/apply_patch` absolute-path form Codex uses for its per-session
+// shim binary. Any other shape (function definitions, command
+// substitutions, builtins, etc.) returns false.
+func stmtInvokesApplyPatch(stmt *syntax.Stmt) bool {
+	call, ok := stmt.Cmd.(*syntax.CallExpr)
+	if !ok || len(call.Args) == 0 {
+		return false
+	}
+	name := call.Args[0].Lit()
+	if name == "apply_patch" {
+		return true
+	}
+	if strings.HasSuffix(name, "/apply_patch") {
+		return true
+	}
+	return false
+}
+
+// heredocBody is the extracted body of one here-doc redirect, plus a
+// hint about whether tab-stripping (POSIX `<<-` semantics) was applied.
+// We carry this rather than returning a raw string so test failures can
+// report which variant a particular body came from.
+type heredocBody struct {
+	text       string
+	stripIndent bool
+}
+
+// heredocBodyFromRedirect returns the body text for a here-doc redirect
+// (`<<` or `<<-`), sliced from the original command using positional
+// offsets so we preserve the bytes exactly as Codex emitted them. For
+// `<<-` (DashHdoc) we strip leading TAB characters from each line, per
+// POSIX, so the body handed to ParseApplyPatch matches what Bash would
+// have piped to apply_patch's stdin.
+//
+// The Hdoc Word's End() points just past the trailing delimiter token
+// (e.g. `PATCH`), so the returned body includes that trailing line.
+// ParseApplyPatch tolerates the extra line (it stops dispatching state
+// at `*** End Patch`) so we don't try to trim it here — keeping the
+// slice byte-exact makes the helper easier to reason about than one
+// that does ad-hoc post-processing.
+func heredocBodyFromRedirect(command string, r *syntax.Redirect) (heredocBody, bool) {
+	if r.Op != syntax.Hdoc && r.Op != syntax.DashHdoc {
+		return heredocBody{}, false
+	}
+	if r.Hdoc == nil {
+		return heredocBody{}, false
+	}
+	start := int(r.Hdoc.Pos().Offset())
+	end := int(r.Hdoc.End().Offset())
+	if start < 0 || end > len(command) || start >= end {
+		return heredocBody{}, false
+	}
+	body := command[start:end]
+	stripIndent := r.Op == syntax.DashHdoc
+	if stripIndent {
+		body = stripLeadingTabsPerLine(body)
+	}
+	return heredocBody{text: body, stripIndent: stripIndent}, true
+}
+
+// stripLeadingTabsPerLine removes leading TAB characters (not spaces)
+// from each newline-delimited line of body. Mirrors Bash's `<<-DELIM`
+// semantics so ParseApplyPatch can match line prefixes like
+// `*** Begin Patch` even when Codex emits the patch under the
+// strip-tabs heredoc operator.
+func stripLeadingTabsPerLine(body string) string {
+	if !strings.ContainsRune(body, '\t') {
+		return body
+	}
+	lines := strings.Split(body, "\n")
+	for i, line := range lines {
+		lines[i] = strings.TrimLeft(line, "\t")
+	}
+	return strings.Join(lines, "\n")
 }
