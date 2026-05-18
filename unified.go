@@ -735,20 +735,28 @@ func OnAfterFileEdit(handler FileEditHandler) {
 	//                      or old_string/new_string. Native first-class tools.
 	//   2. apply_patch   — tool_input.command holds a unified-diff envelope
 	//                      that may touch multiple files in a single call.
-	//   3. Bash          — tool_input.command holds `apply_patch <<'PATCH'
-	//                      … PATCH` (sometimes with an absolute path to a
-	//                      per-session apply_patch shim). Codex routes file
-	//                      edits this way at least as often as (2). Without
-	//                      handling this case the SecurityScanResults dash
-	//                      stayed empty for every Codex session because no
-	//                      afterFileEdit telemetry was ever emitted.
+	//   3. Bash          — tool_input.command holds one of two shapes:
+	//                        a. Edits:    `apply_patch <<'PATCH' … PATCH`
+	//                                     (sometimes with an absolute path
+	//                                     to a per-session apply_patch shim)
+	//                        b. Writes:   `cat <<'EOF' > FILE … EOF` or
+	//                                     `tee FILE <<'EOF' … EOF`
+	//                      Codex routes virtually all file operations this
+	//                      way: edits via (a), greenfield writes via (b).
+	//                      Without handling BOTH cases the
+	//                      SecurityScanResults dashboard stayed empty for
+	//                      every Codex session — no afterFileEdit
+	//                      telemetry was ever emitted for "Create a file"
+	//                      prompts or for in-place edits.
 	//
-	// For (2) and (3) we run the patch through codex.ParseApplyPatch and
-	// invoke the user's handler exactly once per file in the envelope, then
-	// reduce the per-file decisions: a Block from any file wins, otherwise
-	// context strings are concatenated. The parser is also exported as
-	// codex.ParseApplyPatch / codex.ParseApplyPatchFromBash for callers
-	// that want raw access.
+	// For (2) and (3a) we run the patch through codex.ParseApplyPatch and
+	// invoke the user's handler exactly once per file in the envelope. For
+	// (3b) codex.ParseBashRedirectWrite synthesizes a single PatchFile so
+	// the same dispatchPatch reducer drives every shape. Per-file
+	// decisions reduce as: a Block from any file wins, otherwise context
+	// strings are concatenated. The parsers are also exported as
+	// codex.ParseApplyPatch / codex.ParseApplyPatchFromBash /
+	// codex.ParseBashRedirectWrite for callers that want raw access.
 	//
 	// Configure the hook with matcher "Bash|apply_patch|mcp__.*" in
 	// hooks.json — "Edit" and "Write" matcher aliases exist but are
@@ -872,21 +880,37 @@ func OnAfterFileEdit(handler FileEditHandler) {
 				return dispatchPatch(codex.ParseApplyPatch(applyInput.Command), applyInput.Command)
 
 			case "Bash":
-				// Codex routes most file edits through Bash:
-				//   `apply_patch <<'PATCH' … PATCH`
-				// Detection lives in codex.ParseApplyPatchFromBash so
-				// non-edit Bash commands short-circuit cheaply. If the
-				// command IS an apply_patch invocation, dispatch through
-				// the same per-file pipeline as case "apply_patch".
+				// Codex routes file operations through Bash in two
+				// distinct shapes that look superficially similar but
+				// require different parsers:
+				//
+				//   1. Edits to existing files:
+				//        apply_patch <<'PATCH' … *** End Patch … PATCH
+				//      parsed by codex.ParseApplyPatchFromBash.
+				//
+				//   2. Greenfield writes (and overwrite-style writes):
+				//        cat <<'EOF' > newfile.txt … EOF
+				//        tee newfile.txt <<'EOF' … EOF
+				//      parsed by codex.ParseBashRedirectWrite.
+				//
+				// Both produce []PatchFile suitable for the shared
+				// dispatchPatch reducer. We try apply_patch first
+				// because it's the higher-fidelity shape (per-hunk
+				// old/new) when both detectors would match, then fall
+				// back to the heredoc-write detector. Non-edit Bash
+				// commands short-circuit at the second `if !ok` check
+				// without paying for either full parse pass.
 				var bashInput struct {
 					Command string `json:"command"`
 				}
 				json.Unmarshal(input.ToolInput, &bashInput)
-				files, ok := codex.ParseApplyPatchFromBash(bashInput.Command)
-				if !ok {
-					return codex.PostToolOK()
+				if files, ok := codex.ParseApplyPatchFromBash(bashInput.Command); ok {
+					return dispatchPatch(files, bashInput.Command)
 				}
-				return dispatchPatch(files, bashInput.Command)
+				if files, ok := codex.ParseBashRedirectWrite(bashInput.Command); ok {
+					return dispatchPatch(files, bashInput.Command)
+				}
+				return codex.PostToolOK()
 
 			default:
 				return codex.PostToolOK()

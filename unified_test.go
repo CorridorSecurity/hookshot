@@ -1240,6 +1240,87 @@ func TestCodexPostToolUse_BashNonApplyPatchCommandSkipped(t *testing.T) {
 	}
 }
 
+func TestCodexPostToolUse_BashCatHeredocWriteDispatches(t *testing.T) {
+	// Codex 0.130.0+ routes greenfield writes through a plain Bash
+	// `cat <<'EOF' > FILE … EOF` heredoc rather than apply_patch or any
+	// Write/Edit tool alias. Without this dispatch path, no afterFileEdit
+	// fires for "Create a file …" prompts and the security scanner
+	// never sees the new file — the exact regression that motivated
+	// ParseBashRedirectWrite. This test pins the wiring end-to-end.
+	ClearHandlers()
+	defer ClearHandlers()
+
+	var got []FileEditContext
+	OnAfterFileEdit(func(ctx FileEditContext) FileEditDecision {
+		got = append(got, ctx)
+		return FileEditOK()
+	})
+
+	cmd := "cat <<'EOF' > greet.txt\\nhello world\\nEOF"
+	stdin := `{"session_id":"s","tool_name":"Bash","tool_input":{"command":"` + cmd + `"},"cwd":"/repo"}`
+	runHandlerWithStdin(t, "codex-post-tool-use", stdin)
+
+	if len(got) != 1 {
+		t.Fatalf("handler invocations = %d, want 1; got=%+v", len(got), got)
+	}
+	if got[0].FilePath != "greet.txt" {
+		t.Errorf("FilePath = %q, want %q", got[0].FilePath, "greet.txt")
+	}
+	if got[0].Platform != PlatformCodex {
+		t.Errorf("Platform = %q, want %q", got[0].Platform, PlatformCodex)
+	}
+	if got[0].Cwd != "/repo" {
+		t.Errorf("Cwd = %q, want %q", got[0].Cwd, "/repo")
+	}
+	wantEdit := FileEdit{OldString: "", NewString: "hello world"}
+	if len(got[0].Edits) != 1 || got[0].Edits[0] != wantEdit {
+		t.Errorf("Edits = %+v, want [%+v]", got[0].Edits, wantEdit)
+	}
+}
+
+func TestCodexPostToolUse_BashCatHeredocBlockPropagates(t *testing.T) {
+	// Blocking decisions on cat-heredoc writes must surface as
+	// PostToolBlock JSON, identical to the apply_patch path. This is
+	// what lets policies like "no .env files" actually stop Codex
+	// from creating sensitive files via greenfield writes.
+	ClearHandlers()
+	defer ClearHandlers()
+
+	OnAfterFileEdit(func(ctx FileEditContext) FileEditDecision {
+		if strings.HasSuffix(ctx.FilePath, ".env") {
+			return FileEditBlock("no env files")
+		}
+		return FileEditOK()
+	})
+
+	cmd := "cat <<'EOF' > .env\\nSECRET=abc\\nEOF"
+	stdin := `{"session_id":"s","tool_name":"Bash","tool_input":{"command":"` + cmd + `"},"cwd":"/repo"}`
+
+	stdinR, stdinW, _ := os.Pipe()
+	stdinW.Write([]byte(stdin))
+	stdinW.Close()
+	stdoutR, stdoutW, _ := os.Pipe()
+	origStdin, origStdout := os.Stdin, os.Stdout
+	os.Stdin, os.Stdout = stdinR, stdoutW
+	defer func() {
+		stdoutW.Close()
+		os.Stdin, os.Stdout = origStdin, origStdout
+	}()
+
+	handlers["codex-post-tool-use"]()
+	stdoutW.Close()
+
+	var buf bytes.Buffer
+	buf.ReadFrom(stdoutR)
+	out := buf.String()
+	if !strings.Contains(out, `"decision":"block"`) {
+		t.Errorf("expected PostToolBlock JSON output, got %q", out)
+	}
+	if !strings.Contains(out, "no env files") {
+		t.Errorf("expected block reason in output, got %q", out)
+	}
+}
+
 func TestCodexPostToolUse_BashApplyPatchBlockPropagates(t *testing.T) {
 	// A blocking decision from the user's handler on a Bash-heredoc
 	// apply_patch must emit PostToolBlock so Codex surfaces the feedback,
