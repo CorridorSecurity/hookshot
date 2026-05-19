@@ -301,6 +301,133 @@ Flags:`)
 	fmt.Println("\nInstallation complete!")
 }
 
+// =============================================================================
+// Install config types — Claude-style (Claude Code, Factory Droid, Codex)
+// =============================================================================
+
+// claudeHookCommand is a single hook command entry in a Claude Code settings file.
+type claudeHookCommand struct {
+	Type    string `json:"type"`
+	Command string `json:"command"`
+}
+
+// claudeHookEntry groups an optional matcher with one or more hook commands.
+type claudeHookEntry struct {
+	Matcher string             `json:"matcher,omitempty"`
+	Hooks   []claudeHookCommand `json:"hooks"`
+}
+
+// claudeHooksConfig is the value of the top-level "hooks" key in
+// ~/.claude/settings.json, ~/.factory/settings.json, and ~/.codex/hooks.json.
+type claudeHooksConfig struct {
+	Stop             []claudeHookEntry `json:"Stop,omitempty"`
+	PreToolUse       []claudeHookEntry `json:"PreToolUse,omitempty"`
+	PostToolUse      []claudeHookEntry `json:"PostToolUse,omitempty"`
+	UserPromptSubmit []claudeHookEntry `json:"UserPromptSubmit,omitempty"`
+}
+
+// =============================================================================
+// Install config types — Cursor
+// =============================================================================
+
+type cursorHookCommand struct {
+	Command string `json:"command"`
+}
+
+type cursorHooksSection struct {
+	Stop                 []cursorHookCommand `json:"stop,omitempty"`
+	BeforeShellExecution []cursorHookCommand `json:"beforeShellExecution,omitempty"`
+	BeforeMCPExecution   []cursorHookCommand `json:"beforeMCPExecution,omitempty"`
+	AfterFileEdit        []cursorHookCommand `json:"afterFileEdit,omitempty"`
+	BeforeSubmitPrompt   []cursorHookCommand `json:"beforeSubmitPrompt,omitempty"`
+}
+
+type cursorConfig struct {
+	Version int                `json:"version"`
+	Hooks   cursorHooksSection `json:"hooks"`
+}
+
+// =============================================================================
+// Install config types — Windsurf Cascade
+// =============================================================================
+
+type cascadeHookCommand struct {
+	Command string `json:"command"`
+}
+
+type cascadeHooksSection struct {
+	PreRunCommand       []cascadeHookCommand `json:"pre_run_command,omitempty"`
+	PreMCPToolUse       []cascadeHookCommand `json:"pre_mcp_tool_use,omitempty"`
+	PreUserPrompt       []cascadeHookCommand `json:"pre_user_prompt,omitempty"`
+	PostWriteCode       []cascadeHookCommand `json:"post_write_code,omitempty"`
+	PostCascadeResponse []cascadeHookCommand `json:"post_cascade_response,omitempty"`
+}
+
+type cascadeConfig struct {
+	Hooks cascadeHooksSection `json:"hooks"`
+}
+
+// =============================================================================
+// Codex tool matcher
+// =============================================================================
+
+// codexToolMatcher covers Bash (heredoc file edits and greenfield writes that
+// Codex 0.130.0+ routes through plain Bash), apply_patch, and MCP tool calls.
+// "apply_patch" alone covers Codex file edits — Codex emits "Edit" and "Write"
+// as matcher aliases for apply_patch, so they're redundant here.
+const codexToolMatcher = "Bash|apply_patch|mcp__.*"
+
+// =============================================================================
+// Install helpers
+// =============================================================================
+
+// writeClaudeStyleConfig reads an existing JSON file at path (preserving
+// unrelated top-level keys like "permissions" or "mcpServers"), replaces the
+// "hooks" key with the typed value, and writes the result back.
+func writeClaudeStyleConfig(path string, hooks claudeHooksConfig) error {
+	var config map[string]any
+	data, err := os.ReadFile(path)
+	if err == nil {
+		json.Unmarshal(data, &config)
+	}
+	if config == nil {
+		config = make(map[string]any)
+	}
+
+	hooksJSON, err := json.Marshal(hooks)
+	if err != nil {
+		return fmt.Errorf("marshaling hooks: %w", err)
+	}
+	var hooksMap any
+	if err := json.Unmarshal(hooksJSON, &hooksMap); err != nil {
+		return fmt.Errorf("round-tripping hooks to any: %w", err)
+	}
+	config["hooks"] = hooksMap
+
+	return writeJSONFile(path, config)
+}
+
+// writeJSONFile marshals v as indented JSON, creates parent directories, and
+// writes the file. Used for Cursor and Cascade configs that overwrite the
+// whole file, and as the final write step for writeClaudeStyleConfig.
+func writeJSONFile(path string, v any) error {
+	output, err := json.MarshalIndent(v, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshaling JSON: %w", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		return fmt.Errorf("creating directory: %w", err)
+	}
+	if err := os.WriteFile(path, output, 0644); err != nil {
+		return fmt.Errorf("writing file: %w", err)
+	}
+	return nil
+}
+
+// =============================================================================
+// Install functions
+// =============================================================================
+
 func installClaude(binaryPath string) error {
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
@@ -310,58 +437,24 @@ func installClaude(binaryPath string) error {
 
 	fmt.Printf("Installing to Claude Code (%s)...\n", configPath)
 
-	// Read existing config or create new
-	var config map[string]any
-	data, err := os.ReadFile(configPath)
-	if err == nil {
-		json.Unmarshal(data, &config)
-	}
-	if config == nil {
-		config = make(map[string]any)
-	}
-
-	// Build hooks config
-	hooks := map[string]any{
-		"Stop": []map[string]any{{
-			"hooks": []map[string]any{{
-				"type":    "command",
-				"command": binaryPath + " claude-stop",
-			}},
+	hooks := claudeHooksConfig{
+		Stop: []claudeHookEntry{{
+			Hooks: []claudeHookCommand{{Type: "command", Command: binaryPath + " claude-stop"}},
 		}},
-		"PreToolUse": []map[string]any{{
-			"matcher": "*",
-			"hooks": []map[string]any{{
-				"type":    "command",
-				"command": binaryPath + " claude-pre-tool-use",
-			}},
+		PreToolUse: []claudeHookEntry{{
+			Matcher: "*",
+			Hooks:   []claudeHookCommand{{Type: "command", Command: binaryPath + " claude-pre-tool-use"}},
 		}},
-		"PostToolUse": []map[string]any{{
-			"matcher": "Write|Edit",
-			"hooks": []map[string]any{{
-				"type":    "command",
-				"command": binaryPath + " claude-after-file-edit",
-			}},
+		PostToolUse: []claudeHookEntry{{
+			Matcher: "Write|Edit",
+			Hooks:   []claudeHookCommand{{Type: "command", Command: binaryPath + " claude-after-file-edit"}},
 		}},
-		"UserPromptSubmit": []map[string]any{{
-			"hooks": []map[string]any{{
-				"type":    "command",
-				"command": binaryPath + " claude-user-prompt-submit",
-			}},
+		UserPromptSubmit: []claudeHookEntry{{
+			Hooks: []claudeHookCommand{{Type: "command", Command: binaryPath + " claude-user-prompt-submit"}},
 		}},
 	}
 
-	config["hooks"] = hooks
-
-	// Ensure directory exists
-	os.MkdirAll(filepath.Dir(configPath), 0755)
-
-	// Write config
-	output, err := json.MarshalIndent(config, "", "  ")
-	if err != nil {
-		return err
-	}
-
-	if err := os.WriteFile(configPath, output, 0644); err != nil {
+	if err := writeClaudeStyleConfig(configPath, hooks); err != nil {
 		return err
 	}
 
@@ -378,28 +471,18 @@ func installCursor(binaryPath string) error {
 
 	fmt.Printf("Installing to Cursor (%s)...\n", configPath)
 
-	// Build hooks config
-	config := map[string]any{
-		"version": 1,
-		"hooks": map[string]any{
-			"stop":                 []map[string]any{{"command": binaryPath + " cursor-stop"}},
-			"beforeShellExecution": []map[string]any{{"command": binaryPath + " cursor-before-shell"}},
-			"beforeMCPExecution":   []map[string]any{{"command": binaryPath + " cursor-before-mcp"}},
-			"afterFileEdit":        []map[string]any{{"command": binaryPath + " cursor-after-file-edit"}},
-			"beforeSubmitPrompt":   []map[string]any{{"command": binaryPath + " cursor-before-submit-prompt"}},
+	config := cursorConfig{
+		Version: 1,
+		Hooks: cursorHooksSection{
+			Stop:                 []cursorHookCommand{{Command: binaryPath + " cursor-stop"}},
+			BeforeShellExecution: []cursorHookCommand{{Command: binaryPath + " cursor-before-shell"}},
+			BeforeMCPExecution:   []cursorHookCommand{{Command: binaryPath + " cursor-before-mcp"}},
+			AfterFileEdit:        []cursorHookCommand{{Command: binaryPath + " cursor-after-file-edit"}},
+			BeforeSubmitPrompt:   []cursorHookCommand{{Command: binaryPath + " cursor-before-submit-prompt"}},
 		},
 	}
 
-	// Ensure directory exists
-	os.MkdirAll(filepath.Dir(configPath), 0755)
-
-	// Write config
-	output, err := json.MarshalIndent(config, "", "  ")
-	if err != nil {
-		return err
-	}
-
-	if err := os.WriteFile(configPath, output, 0644); err != nil {
+	if err := writeJSONFile(configPath, config); err != nil {
 		return err
 	}
 
@@ -416,58 +499,24 @@ func installDroid(binaryPath string) error {
 
 	fmt.Printf("Installing to Factory Droid (%s)...\n", configPath)
 
-	// Read existing config or create new
-	var config map[string]any
-	data, err := os.ReadFile(configPath)
-	if err == nil {
-		json.Unmarshal(data, &config)
-	}
-	if config == nil {
-		config = make(map[string]any)
-	}
-
-	// Build hooks config (same structure as Claude Code)
-	hooks := map[string]any{
-		"Stop": []map[string]any{{
-			"hooks": []map[string]any{{
-				"type":    "command",
-				"command": binaryPath + " droid-stop",
-			}},
+	hooks := claudeHooksConfig{
+		Stop: []claudeHookEntry{{
+			Hooks: []claudeHookCommand{{Type: "command", Command: binaryPath + " droid-stop"}},
 		}},
-		"PreToolUse": []map[string]any{{
-			"matcher": "*",
-			"hooks": []map[string]any{{
-				"type":    "command",
-				"command": binaryPath + " droid-pre-tool-use",
-			}},
+		PreToolUse: []claudeHookEntry{{
+			Matcher: "*",
+			Hooks:   []claudeHookCommand{{Type: "command", Command: binaryPath + " droid-pre-tool-use"}},
 		}},
-		"PostToolUse": []map[string]any{{
-			"matcher": "Write|Edit",
-			"hooks": []map[string]any{{
-				"type":    "command",
-				"command": binaryPath + " droid-after-file-edit",
-			}},
+		PostToolUse: []claudeHookEntry{{
+			Matcher: "Write|Edit",
+			Hooks:   []claudeHookCommand{{Type: "command", Command: binaryPath + " droid-after-file-edit"}},
 		}},
-		"UserPromptSubmit": []map[string]any{{
-			"hooks": []map[string]any{{
-				"type":    "command",
-				"command": binaryPath + " droid-user-prompt-submit",
-			}},
+		UserPromptSubmit: []claudeHookEntry{{
+			Hooks: []claudeHookCommand{{Type: "command", Command: binaryPath + " droid-user-prompt-submit"}},
 		}},
 	}
 
-	config["hooks"] = hooks
-
-	// Ensure directory exists
-	os.MkdirAll(filepath.Dir(configPath), 0755)
-
-	// Write config
-	output, err := json.MarshalIndent(config, "", "  ")
-	if err != nil {
-		return err
-	}
-
-	if err := os.WriteFile(configPath, output, 0644); err != nil {
+	if err := writeClaudeStyleConfig(configPath, hooks); err != nil {
 		return err
 	}
 
@@ -484,68 +533,24 @@ func installCodex(binaryPath string) error {
 
 	fmt.Printf("Installing to OpenAI Codex (%s)...\n", configPath)
 
-	// Read existing config or create new
-	var config map[string]any
-	data, err := os.ReadFile(configPath)
-	if err == nil {
-		json.Unmarshal(data, &config)
-	}
-	if config == nil {
-		config = make(map[string]any)
-	}
-
-	// Codex hook config follows the same JSON shape as Claude Code's
-	// settings but lives in ~/.codex/hooks.json. Matchers include
-	// "mcp__.*" so MCP tool calls reach the hook binary. "apply_patch"
-	// alone covers Codex file edits — Codex emits "Edit" and "Write" as
-	// matcher aliases for apply_patch, so they're redundant here.
-	hooks := map[string]any{
-		"Stop": []map[string]any{{
-			"hooks": []map[string]any{{
-				"type":    "command",
-				"command": binaryPath + " codex-stop",
-			}},
+	hooks := claudeHooksConfig{
+		Stop: []claudeHookEntry{{
+			Hooks: []claudeHookCommand{{Type: "command", Command: binaryPath + " codex-stop"}},
 		}},
-		"PreToolUse": []map[string]any{{
-			"matcher": "Bash|apply_patch|mcp__.*",
-			"hooks": []map[string]any{{
-				"type":    "command",
-				"command": binaryPath + " codex-pre-tool-use",
-			}},
+		PreToolUse: []claudeHookEntry{{
+			Matcher: codexToolMatcher,
+			Hooks:   []claudeHookCommand{{Type: "command", Command: binaryPath + " codex-pre-tool-use"}},
 		}},
-		"PostToolUse": []map[string]any{{
-			// Bash is required to catch the heredoc-style file edits
-			// (`apply_patch <<'PATCH' … PATCH`) and greenfield writes
-			// (`cat <<'EOF' > FILE … EOF`) Codex 0.130.0+ routes
-			// through plain Bash in addition to the apply_patch tool. The
-			// unified codex-post-tool-use bridge parses both shapes via
-			// codex.ParseApplyPatchFromBash / codex.ParseBashRedirectWrite
-			// — but only sees the events if the matcher itself lets
-			// them through.
-			"matcher": "Bash|apply_patch|mcp__.*",
-			"hooks": []map[string]any{{
-				"type":    "command",
-				"command": binaryPath + " codex-post-tool-use",
-			}},
+		PostToolUse: []claudeHookEntry{{
+			Matcher: codexToolMatcher,
+			Hooks:   []claudeHookCommand{{Type: "command", Command: binaryPath + " codex-post-tool-use"}},
 		}},
-		"UserPromptSubmit": []map[string]any{{
-			"hooks": []map[string]any{{
-				"type":    "command",
-				"command": binaryPath + " codex-user-prompt-submit",
-			}},
+		UserPromptSubmit: []claudeHookEntry{{
+			Hooks: []claudeHookCommand{{Type: "command", Command: binaryPath + " codex-user-prompt-submit"}},
 		}},
 	}
 
-	config["hooks"] = hooks
-
-	os.MkdirAll(filepath.Dir(configPath), 0755)
-
-	output, err := json.MarshalIndent(config, "", "  ")
-	if err != nil {
-		return err
-	}
-
-	if err := os.WriteFile(configPath, output, 0644); err != nil {
+	if err := writeClaudeStyleConfig(configPath, hooks); err != nil {
 		return err
 	}
 
@@ -562,27 +567,17 @@ func installCascade(binaryPath string) error {
 
 	fmt.Printf("Installing to Windsurf Cascade (%s)...\n", configPath)
 
-	// Build hooks config
-	config := map[string]any{
-		"hooks": map[string]any{
-			"pre_run_command":       []map[string]any{{"command": binaryPath + " cascade-pre-run-command"}},
-			"pre_mcp_tool_use":      []map[string]any{{"command": binaryPath + " cascade-pre-mcp-tool-use"}},
-			"pre_user_prompt":       []map[string]any{{"command": binaryPath + " cascade-pre-user-prompt"}},
-			"post_write_code":       []map[string]any{{"command": binaryPath + " cascade-post-write-code"}},
-			"post_cascade_response": []map[string]any{{"command": binaryPath + " cascade-post-cascade-response"}},
+	config := cascadeConfig{
+		Hooks: cascadeHooksSection{
+			PreRunCommand:       []cascadeHookCommand{{Command: binaryPath + " cascade-pre-run-command"}},
+			PreMCPToolUse:       []cascadeHookCommand{{Command: binaryPath + " cascade-pre-mcp-tool-use"}},
+			PreUserPrompt:       []cascadeHookCommand{{Command: binaryPath + " cascade-pre-user-prompt"}},
+			PostWriteCode:       []cascadeHookCommand{{Command: binaryPath + " cascade-post-write-code"}},
+			PostCascadeResponse: []cascadeHookCommand{{Command: binaryPath + " cascade-post-cascade-response"}},
 		},
 	}
 
-	// Ensure directory exists
-	os.MkdirAll(filepath.Dir(configPath), 0755)
-
-	// Write config
-	output, err := json.MarshalIndent(config, "", "  ")
-	if err != nil {
-		return err
-	}
-
-	if err := os.WriteFile(configPath, output, 0644); err != nil {
+	if err := writeJSONFile(configPath, config); err != nil {
 		return err
 	}
 
