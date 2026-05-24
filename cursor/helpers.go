@@ -116,6 +116,22 @@ func DenyTabRead() BeforeTabFileReadOutput {
 }
 
 // =============================================================================
+// SessionStart Helpers
+// =============================================================================
+
+// SessionStartOK returns an empty output for session start.
+func SessionStartOK() SessionStartOutput {
+	return SessionStartOutput{}
+}
+
+// SessionStartContext injects additional context at session start.
+func SessionStartContext(context string) SessionStartOutput {
+	return SessionStartOutput{
+		AdditionalContext: context,
+	}
+}
+
+// =============================================================================
 // Before Submit Prompt Helpers
 // =============================================================================
 

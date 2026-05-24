@@ -63,7 +63,7 @@
 //   - [OnBeforeExecution]: Shell/MCP execution for both platforms
 //   - [OnAfterFileEdit]: File edit hooks for both platforms
 //   - [OnPromptSubmit]: Prompt submission for both platforms
-//   - [OnSessionStart]: Session start (Claude Code only)
+//   - [OnSessionStart]: Session start (Claude Code, Cursor, Droid, Cascade, Codex)
 //
 // # Error Handling
 //

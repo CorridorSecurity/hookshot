@@ -179,6 +179,21 @@ type BeforeSubmitPromptOutput struct {
 }
 
 // =============================================================================
+// SessionStart
+// =============================================================================
+
+// SessionStartInput is received when a Cursor agent session starts.
+// See https://cursor.com/docs/agent/hooks (sessionStart).
+type SessionStartInput struct {
+	BaseInput
+}
+
+// SessionStartOutput can inject context at session start.
+type SessionStartOutput struct {
+	AdditionalContext string `json:"additional_context,omitempty"`
+}
+
+// =============================================================================
 // Stop
 // =============================================================================
 

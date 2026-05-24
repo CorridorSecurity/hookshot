@@ -3,6 +3,7 @@ package hookshot
 import (
 	"encoding/json"
 	"errors"
+	"os"
 	"strings"
 
 	"github.com/CorridorSecurity/hookshot/cascade"
@@ -1078,6 +1079,165 @@ func OnPromptSubmit(handler PromptHandler) {
 				return codex.AddContext(decision.Context)
 			}
 			return codex.AllowPrompt()
+		})
+	})
+}
+
+// =============================================================================
+// Unified Session Start Handler
+// =============================================================================
+
+// SessionStartContext provides a unified view of session start events.
+type SessionStartContext struct {
+	Platform  Platform
+	SessionID string // Claude/Droid/Codex: session_id, Cursor: conversation_id, Cascade: trajectory_id
+	Cwd       string // Working directory (Cursor: workspace_roots[0])
+
+	// Source indicates how the session started (Claude Code / Codex / Droid).
+	// Empty for Cursor and Cascade.
+	Source string
+
+	// WorkspaceRoots is populated for Cursor sessionStart hooks.
+	WorkspaceRoots []string
+
+	// Raw input for advanced use cases
+	RawClaudeCode *claude.SessionStartInput
+	RawCursor     *cursor.SessionStartInput
+	RawDroid      *droid.SessionStartInput
+	RawCodex      *codex.SessionStartInput
+	// RawCascade is set when cascade-session-start is invoked with the
+	// flat trajectory_id / conversation_id JSON shape.
+	RawCascade *cascadeSessionStartWire
+}
+
+// cascadeSessionStartWire is the JSON shape for cascade-session-start.
+// Cascade has no native SessionStart hook; corridor invokes this subprocess
+// from pre-user-prompt on the first message.
+type cascadeSessionStartWire struct {
+	TrajectoryID   string `json:"trajectory_id"`
+	ConversationID string `json:"conversation_id"`
+}
+
+// SessionStartDecision represents the unified decision for session start hooks.
+type SessionStartDecision struct {
+	// Context is additional context injected for the agent when non-empty.
+	// Claude Code, Droid, and Codex use hookSpecificOutput.additionalContext;
+	// Cursor uses top-level additional_context.
+	Context string
+}
+
+// SessionStartOK returns a decision that does not inject context.
+func SessionStartOK() SessionStartDecision {
+	return SessionStartDecision{}
+}
+
+// SessionStartAddContext injects context at session start.
+func SessionStartAddContext(context string) SessionStartDecision {
+	return SessionStartDecision{Context: context}
+}
+
+// SessionStartHandler is the function signature for unified session start handlers.
+type SessionStartHandler func(SessionStartContext) SessionStartDecision
+
+// OnSessionStart registers a unified handler for session start events.
+// It automatically registers handlers for:
+//   - "claude-session-start"
+//   - "cursor-session-start"
+//   - "droid-session-start"
+//   - "cascade-session-start" (also invoked internally by cascade pre-user-prompt flows)
+//   - "codex-session-start"
+func OnSessionStart(handler SessionStartHandler) {
+	Register("claude-session-start", func() {
+		Run(func(input claude.SessionStartInput) claude.SessionStartOutput {
+			ctx := SessionStartContext{
+				Platform:      PlatformClaude,
+				SessionID:     input.SessionID,
+				Cwd:           input.Cwd,
+				Source:        input.Source,
+				RawClaudeCode: &input,
+			}
+			decision := handler(ctx)
+			if decision.Context != "" {
+				return claude.SessionStartContext(decision.Context)
+			}
+			return claude.SessionStartOK()
+		})
+	})
+
+	Register("cursor-session-start", func() {
+		Run(func(input cursor.SessionStartInput) cursor.SessionStartOutput {
+			ctx := SessionStartContext{
+				Platform:       PlatformCursor,
+				SessionID:      input.ConversationID,
+				Cwd:            cursorWorkspaceRoot(input.WorkspaceRoots),
+				WorkspaceRoots: input.WorkspaceRoots,
+				RawCursor:      &input,
+			}
+			decision := handler(ctx)
+			if decision.Context != "" {
+				return cursor.SessionStartContext(decision.Context)
+			}
+			return cursor.SessionStartOK()
+		})
+	})
+
+	Register("droid-session-start", func() {
+		Run(func(input struct {
+			droid.SessionStartInput
+			SessionIDCamel string `json:"sessionId"`
+		}) droid.SessionStartOutput {
+			sessionID := input.SessionID
+			if sessionID == "" {
+				sessionID = input.SessionIDCamel
+			}
+			ctx := SessionStartContext{
+				Platform:  PlatformDroid,
+				SessionID: sessionID,
+				Cwd:       input.Cwd,
+				Source:    input.Source,
+				RawDroid:  &input.SessionStartInput,
+			}
+			decision := handler(ctx)
+			if decision.Context != "" {
+				return droid.SessionStartContext(decision.Context)
+			}
+			return droid.SessionStartOK()
+		})
+	})
+
+	// Cascade has no native SessionStart hook; corridor invokes
+	// cascade-session-start from pre-user-prompt on the first message.
+	Register("cascade-session-start", func() {
+		var wire cascadeSessionStartWire
+		if err := internal.ReadJSON(&wire); err != nil {
+			os.Exit(0)
+		}
+		sessionID := wire.TrajectoryID
+		if sessionID == "" {
+			sessionID = wire.ConversationID
+		}
+		handler(SessionStartContext{
+			Platform:   PlatformCascade,
+			SessionID:  sessionID,
+			RawCascade: &wire,
+		})
+		os.Exit(0)
+	})
+
+	Register("codex-session-start", func() {
+		Run(func(input codex.SessionStartInput) codex.SessionStartOutput {
+			ctx := SessionStartContext{
+				Platform:  PlatformCodex,
+				SessionID: input.SessionID,
+				Cwd:       input.Cwd,
+				Source:    input.Source,
+				RawCodex:  &input,
+			}
+			decision := handler(ctx)
+			if decision.Context != "" {
+				return codex.SessionStartContext(decision.Context)
+			}
+			return codex.SessionStartOK()
 		})
 	})
 }

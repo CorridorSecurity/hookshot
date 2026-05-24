@@ -382,6 +382,41 @@ func TestOnStop_RegistersAllHandlers(t *testing.T) {
 	}
 }
 
+func TestSessionStartDecision_Helpers(t *testing.T) {
+	ok := SessionStartOK()
+	if ok.Context != "" {
+		t.Errorf("SessionStartOK().Context = %q, want empty", ok.Context)
+	}
+
+	withCtx := SessionStartAddContext("hello")
+	if withCtx.Context != "hello" {
+		t.Errorf("SessionStartAddContext().Context = %q, want hello", withCtx.Context)
+	}
+}
+
+func TestOnSessionStart_RegistersAllHandlers(t *testing.T) {
+	ClearHandlers()
+	defer ClearHandlers()
+
+	OnSessionStart(func(ctx SessionStartContext) SessionStartDecision {
+		return SessionStartOK()
+	})
+
+	expectedHandlers := []string{
+		"claude-session-start",
+		"cursor-session-start",
+		"droid-session-start",
+		"cascade-session-start",
+		"codex-session-start",
+	}
+
+	for _, name := range expectedHandlers {
+		if _, ok := handlers[name]; !ok {
+			t.Errorf("OnSessionStart did not register handler %q", name)
+		}
+	}
+}
+
 func TestOnAfterFileEdit_RegistersAllHandlers(t *testing.T) {
 	ClearHandlers()
 	defer ClearHandlers()
