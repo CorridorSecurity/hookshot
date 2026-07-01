@@ -68,17 +68,25 @@ import (
 // ok=true with no PatchFiles so the unified bridge dispatches its
 // fallback event instead of silently returning PostToolOK.
 func ParseBashRedirectWrite(command string) ([]PatchFile, bool) {
+	files, _, ok := ParseBashRedirectWriteWithFallback(command)
+	return files, ok
+}
+
+// ParseBashRedirectWriteWithFallback behaves like ParseBashRedirectWrite, and
+// also reports whether callers should dispatch a raw-command fallback in
+// addition to any parsed files.
+func ParseBashRedirectWriteWithFallback(command string) ([]PatchFile, bool, bool) {
 	// Cheap pre-check: every heredoc-style write contains `<<`. This
 	// keeps the parser allocation off the hot path for plain Bash
 	// commands (`pwd`, `ls`, `git diff`, …) which dominate real Codex
 	// traffic.
 	if !strings.Contains(command, "<<") {
-		return nil, false
+		return nil, false, false
 	}
 
 	file, err := syntax.NewParser().Parse(strings.NewReader(command), "")
 	if err != nil {
-		return nil, true
+		return nil, true, true
 	}
 
 	var files []PatchFile
@@ -105,13 +113,13 @@ func ParseBashRedirectWrite(command string) ([]PatchFile, bool) {
 		}
 		return true
 	})
-	if needsFallback {
-		return nil, true
-	}
 	if len(files) == 0 {
-		return nil, false
+		if needsFallback {
+			return nil, true, true
+		}
+		return nil, false, false
 	}
-	return files, true
+	return files, needsFallback, true
 }
 
 type bashWriteStatus int
@@ -167,8 +175,16 @@ func bashRedirectWriteFromPipeline(command string, bin *syntax.BinaryCmd) ([]Pat
 		return nil, writeFallback
 	}
 	paths, status := teeTargetPaths(teeCall)
-	if status != writeFound {
-		return nil, status
+	if status == writeFallback {
+		return nil, writeFallback
+	}
+	if stdoutPath, status := stdoutRedirectPath(teeStmt); status == writeFound {
+		paths = append(paths, stdoutPath)
+	} else if status == writeFallback {
+		return nil, writeFallback
+	}
+	if len(paths) == 0 {
+		return nil, writeNone
 	}
 	return patchFilesForPaths(paths, body), writeFound
 }
@@ -249,8 +265,8 @@ func catRedirectWrite(command string, stmt *syntax.Stmt) ([]PatchFile, bashWrite
 // successful parse means every write was reported.
 func teeRedirectWrite(command string, stmt *syntax.Stmt, call *syntax.CallExpr) ([]PatchFile, bashWriteStatus) {
 	paths, status := teeTargetPaths(call)
-	if status != writeFound {
-		return nil, status
+	if status == writeFallback {
+		return nil, writeFallback
 	}
 	var hdoc *syntax.Redirect
 	for _, r := range stmt.Redirs {
@@ -268,6 +284,14 @@ func teeRedirectWrite(command string, stmt *syntax.Stmt, call *syntax.CallExpr) 
 	body, ok := heredocBodyContent(command, hdoc)
 	if !ok {
 		return nil, writeFallback
+	}
+	if stdoutPath, status := stdoutRedirectPath(stmt); status == writeFound {
+		paths = append(paths, stdoutPath)
+	} else if status == writeFallback {
+		return nil, writeFallback
+	}
+	if len(paths) == 0 {
+		return nil, writeNone
 	}
 	return patchFilesForPaths(paths, body), writeFound
 }
@@ -314,6 +338,29 @@ func teeTargetPaths(call *syntax.CallExpr) ([]string, bashWriteStatus) {
 		return nil, writeNone
 	}
 	return paths, writeFound
+}
+
+func stdoutRedirectPath(stmt *syntax.Stmt) (string, bashWriteStatus) {
+	var out *syntax.Redirect
+	for _, r := range stmt.Redirs {
+		switch r.Op {
+		case syntax.RdrOut, syntax.AppOut:
+			if !redirectsStdout(r) {
+				continue
+			}
+			out = r
+		case syntax.RdrAll, syntax.AppAll:
+			out = r
+		}
+	}
+	if out == nil {
+		return "", writeNone
+	}
+	path, ok := wordText(out.Word)
+	if !ok || path == "" {
+		return "", writeFallback
+	}
+	return path, writeFound
 }
 
 func patchFilesForPaths(paths []string, body string) []PatchFile {

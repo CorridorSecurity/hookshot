@@ -428,7 +428,7 @@ func TestParseBashRedirectWrite_TeeMultipleTargets_AllReported(t *testing.T) {
 }
 
 func TestParseBashRedirectWrite_CatPipeTeeReported(t *testing.T) {
-	cmd := "cat <<'EOF' | tee allowed.txt ../../.ssh/authorized_keys >/dev/null\nattacker-controlled\nEOF"
+	cmd := "cat <<'EOF' | tee allowed.txt ../../.ssh/authorized_keys\nattacker-controlled\nEOF"
 
 	got, ok := ParseBashRedirectWrite(cmd)
 	if !ok {
@@ -437,6 +437,37 @@ func TestParseBashRedirectWrite_CatPipeTeeReported(t *testing.T) {
 	want := []PatchFile{
 		{Operation: "add", FilePath: "allowed.txt", Edits: []PatchEdit{{OldString: "", NewString: "attacker-controlled"}}},
 		{Operation: "add", FilePath: "../../.ssh/authorized_keys", Edits: []PatchEdit{{OldString: "", NewString: "attacker-controlled"}}},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("ParseBashRedirectWrite =\n  %+v\nwant\n  %+v", got, want)
+	}
+}
+
+func TestParseBashRedirectWrite_CatPipeTeeStdoutRedirectReported(t *testing.T) {
+	cmd := "cat <<'EOF' | tee allowed.txt > ../../.ssh/authorized_keys\nattacker-controlled\nEOF"
+
+	got, ok := ParseBashRedirectWrite(cmd)
+	if !ok {
+		t.Fatalf("ParseBashRedirectWrite(...) ok = false; want true")
+	}
+	want := []PatchFile{
+		{Operation: "add", FilePath: "allowed.txt", Edits: []PatchEdit{{OldString: "", NewString: "attacker-controlled"}}},
+		{Operation: "add", FilePath: "../../.ssh/authorized_keys", Edits: []PatchEdit{{OldString: "", NewString: "attacker-controlled"}}},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("ParseBashRedirectWrite =\n  %+v\nwant\n  %+v", got, want)
+	}
+}
+
+func TestParseBashRedirectWrite_CatPipeTeeStdoutOnlyReported(t *testing.T) {
+	cmd := "cat <<'EOF' | tee > out.txt\nbody\nEOF"
+
+	got, ok := ParseBashRedirectWrite(cmd)
+	if !ok {
+		t.Fatalf("ParseBashRedirectWrite(...) ok = false; want true")
+	}
+	want := []PatchFile{
+		{Operation: "add", FilePath: "out.txt", Edits: []PatchEdit{{OldString: "", NewString: "body"}}},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("ParseBashRedirectWrite =\n  %+v\nwant\n  %+v", got, want)
@@ -467,6 +498,24 @@ func TestParseBashRedirectWrite_NonLiteralTargetUsesFallback(t *testing.T) {
 				t.Fatalf("files = %+v, want raw fallback with no structured files", files)
 			}
 		})
+	}
+}
+
+func TestParseBashRedirectWrite_MixedParsedAndFallbackPreservesFiles(t *testing.T) {
+	cmd := "cat <<'EOF' > .env\nTOKEN=secret\nEOF\ncat <<'EOF' > $HOME/out.txt\nbody\nEOF"
+
+	files, fallback, ok := ParseBashRedirectWriteWithFallback(cmd)
+	if !ok {
+		t.Fatalf("ParseBashRedirectWriteWithFallback(...) ok = false; want true")
+	}
+	if !fallback {
+		t.Fatalf("fallback = false, want true")
+	}
+	want := []PatchFile{
+		{Operation: "add", FilePath: ".env", Edits: []PatchEdit{{OldString: "", NewString: "TOKEN=secret"}}},
+	}
+	if !reflect.DeepEqual(files, want) {
+		t.Errorf("files =\n  %+v\nwant\n  %+v", files, want)
 	}
 }
 

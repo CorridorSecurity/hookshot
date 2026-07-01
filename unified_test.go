@@ -1290,6 +1290,37 @@ func TestCodexPostToolUse_BashExpandedPathFallsBackToRawCommand(t *testing.T) {
 	}
 }
 
+func TestCodexPostToolUse_BashMixedParsedAndFallbackDispatchesBoth(t *testing.T) {
+	ClearHandlers()
+	defer ClearHandlers()
+
+	var got []FileEditContext
+	OnAfterFileEdit(func(ctx FileEditContext) FileEditDecision {
+		got = append(got, ctx)
+		return FileEditOK()
+	})
+
+	cmd := "cat <<'EOF' > .env\\nTOKEN=secret\\nEOF\\ncat <<'EOF' > $HOME/out.txt\\nbody\\nEOF"
+	stdin := `{"session_id":"s","tool_name":"Bash","tool_input":{"command":"` + cmd + `"},"cwd":"/repo"}`
+	runHandlerWithStdin(t, "codex-post-tool-use", stdin)
+
+	if len(got) != 2 {
+		t.Fatalf("handler invocations = %d, want parsed file plus raw fallback; got=%+v", len(got), got)
+	}
+	if got[0].FilePath != ".env" {
+		t.Errorf("got[0].FilePath = %q, want .env", got[0].FilePath)
+	}
+	if len(got[0].Edits) != 1 || got[0].Edits[0].NewString != "TOKEN=secret" {
+		t.Errorf("got[0].Edits = %+v, want parsed .env body", got[0].Edits)
+	}
+	if got[1].FilePath != "" {
+		t.Errorf("got[1].FilePath = %q, want empty for raw fallback", got[1].FilePath)
+	}
+	if len(got[1].Edits) != 1 || !strings.Contains(got[1].Edits[0].NewString, "$HOME/out.txt") {
+		t.Errorf("got[1].Edits = %+v, want raw Bash command", got[1].Edits)
+	}
+}
+
 func TestCodexPostToolUse_BashCatHeredocWriteDispatches(t *testing.T) {
 	// Codex 0.130.0+ routes greenfield writes through a plain Bash
 	// `cat <<'EOF' > FILE … EOF` heredoc rather than apply_patch or any
@@ -1338,7 +1369,7 @@ func TestCodexPostToolUse_BashCatPipeTeeDispatches(t *testing.T) {
 		return FileEditOK()
 	})
 
-	cmd := "cat <<'EOF' | tee allowed.txt ../../.ssh/authorized_keys >/dev/null\\nattacker-controlled\\nEOF"
+	cmd := "cat <<'EOF' | tee allowed.txt ../../.ssh/authorized_keys\\nattacker-controlled\\nEOF"
 	stdin := `{"session_id":"s","tool_name":"Bash","tool_input":{"command":"` + cmd + `"},"cwd":"/repo"}`
 	runHandlerWithStdin(t, "codex-post-tool-use", stdin)
 
@@ -1352,6 +1383,28 @@ func TestCodexPostToolUse_BashCatPipeTeeDispatches(t *testing.T) {
 		if len(ctx.Edits) != 1 || ctx.Edits[0].NewString != "attacker-controlled" {
 			t.Errorf("Edits = %+v, want tee body", ctx.Edits)
 		}
+	}
+}
+
+func TestCodexPostToolUse_BashCatPipeTeeStdoutRedirectDispatches(t *testing.T) {
+	ClearHandlers()
+	defer ClearHandlers()
+
+	var got []FileEditContext
+	OnAfterFileEdit(func(ctx FileEditContext) FileEditDecision {
+		got = append(got, ctx)
+		return FileEditOK()
+	})
+
+	cmd := "cat <<'EOF' | tee allowed.txt > ../../.ssh/authorized_keys\\nattacker-controlled\\nEOF"
+	stdin := `{"session_id":"s","tool_name":"Bash","tool_input":{"command":"` + cmd + `"},"cwd":"/repo"}`
+	runHandlerWithStdin(t, "codex-post-tool-use", stdin)
+
+	if len(got) != 2 {
+		t.Fatalf("handler invocations = %d, want 2 tee targets; got=%+v", len(got), got)
+	}
+	if got[0].FilePath != "allowed.txt" || got[1].FilePath != "../../.ssh/authorized_keys" {
+		t.Fatalf("paths = [%q, %q], want allowed.txt and ../../.ssh/authorized_keys", got[0].FilePath, got[1].FilePath)
 	}
 }
 
