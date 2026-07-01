@@ -28,6 +28,19 @@ func TestDeny(t *testing.T) {
 	}
 }
 
+func TestBlock(t *testing.T) {
+	output, err := Block("Action blocked")
+	if output.Decision != "deny" {
+		t.Errorf("Decision = %q, want %q", output.Decision, "deny")
+	}
+	if output.Message != "Action blocked" {
+		t.Errorf("Message = %q, want %q", output.Message, "Action blocked")
+	}
+	if err == nil || err.Error() != "Action blocked" {
+		t.Fatalf("error = %v, want Action blocked", err)
+	}
+}
+
 func TestAsk(t *testing.T) {
 	output := Ask("Confirm action?")
 	if output.Decision != "ask" {
@@ -59,6 +72,16 @@ func TestDenyCommand(t *testing.T) {
 	}
 	if output.Message != "Command not allowed" {
 		t.Errorf("Message = %q, want %q", output.Message, "Command not allowed")
+	}
+}
+
+func TestBlockCommand(t *testing.T) {
+	output, err := BlockCommand("Command not allowed")
+	if output.Decision != "deny" || output.Message != "Command not allowed" {
+		t.Fatalf("output = %+v, want deny with message", output)
+	}
+	if err == nil || err.Error() != "Command not allowed" {
+		t.Fatalf("error = %v, want Command not allowed", err)
 	}
 }
 
@@ -96,6 +119,16 @@ func TestDenyWrite(t *testing.T) {
 	}
 }
 
+func TestBlockWrite(t *testing.T) {
+	output, err := BlockWrite("Write not permitted")
+	if output.Decision != "deny" || output.Message != "Write not permitted" {
+		t.Fatalf("output = %+v, want deny with message", output)
+	}
+	if err == nil || err.Error() != "Write not permitted" {
+		t.Fatalf("error = %v, want Write not permitted", err)
+	}
+}
+
 func TestAskWrite(t *testing.T) {
 	output := AskWrite("Allow file write?")
 	if output.Decision != "ask" {
@@ -127,6 +160,16 @@ func TestDenyRead(t *testing.T) {
 	}
 	if output.Message != "Cannot read file" {
 		t.Errorf("Message = %q, want %q", output.Message, "Cannot read file")
+	}
+}
+
+func TestBlockRead(t *testing.T) {
+	output, err := BlockRead("Cannot read file")
+	if output.Decision != "deny" || output.Message != "Cannot read file" {
+		t.Fatalf("output = %+v, want deny with message", output)
+	}
+	if err == nil || err.Error() != "Cannot read file" {
+		t.Fatalf("error = %v, want Cannot read file", err)
 	}
 }
 
@@ -164,6 +207,16 @@ func TestDenyMCP(t *testing.T) {
 	}
 }
 
+func TestBlockMCP(t *testing.T) {
+	output, err := BlockMCP("MCP tool blocked")
+	if output.Decision != "deny" || output.Message != "MCP tool blocked" {
+		t.Fatalf("output = %+v, want deny with message", output)
+	}
+	if err == nil || err.Error() != "MCP tool blocked" {
+		t.Fatalf("error = %v, want MCP tool blocked", err)
+	}
+}
+
 func TestAskMCP(t *testing.T) {
 	output := AskMCP("Run MCP tool?")
 	if output.Decision != "ask" {
@@ -195,6 +248,16 @@ func TestBlockPrompt(t *testing.T) {
 	}
 	if output.Message != "Prompt blocked" {
 		t.Errorf("Message = %q, want %q", output.Message, "Prompt blocked")
+	}
+}
+
+func TestBlockPromptWithError(t *testing.T) {
+	output, err := BlockPromptWithError("Prompt blocked")
+	if output.Decision != "deny" || output.Message != "Prompt blocked" {
+		t.Fatalf("output = %+v, want deny with message", output)
+	}
+	if err == nil || err.Error() != "Prompt blocked" {
+		t.Fatalf("error = %v, want Prompt blocked", err)
 	}
 }
 

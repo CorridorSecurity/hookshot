@@ -898,8 +898,10 @@ func OnAfterFileEdit(handler FileEditHandler) {
 				// because it's the higher-fidelity shape (per-hunk
 				// old/new) when both detectors would match, then fall
 				// back to the heredoc-write detector. Non-edit Bash
-				// commands short-circuit at the second `if !ok` check
-				// without paying for either full parse pass.
+				// commands short-circuit at the second `if !ok` check.
+				// Unsupported or unsafe write-like heredoc shapes return
+				// ok=true with an empty file list so dispatchPatch sends
+				// the raw command to the handler instead of dropping it.
 				var bashInput struct {
 					Command string `json:"command"`
 				}

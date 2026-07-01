@@ -29,9 +29,11 @@ import (
 // Implementation note: detection runs the command through a real Bash
 // parser (mvdan.cc/sh/v3/syntax) and walks the AST looking for
 // CallExpr statements whose primary command is `cat` or `tee` paired
-// with a heredoc redirect (`<<` or `<<-`, quoted or unquoted) on the
-// same Stmt. This replaced an earlier regex-based implementation that
-// reported only the first match in a command — a multi-heredoc shape
+// with a heredoc redirect (`<<` or `<<-`, quoted or unquoted). For
+// `cat <<EOF | tee FILE`, the heredoc source and file sink live on
+// different statements in a pipeline, so we handle that shape at the
+// BinaryCmd level. This replaced an earlier regex-based implementation
+// that reported only the first match in a command — a multi-heredoc shape
 // like
 //
 //	cat <<'EOF' > allowed.txt
@@ -54,22 +56,17 @@ import (
 // entry overwrite our pick). Every recognised write becomes a
 // PatchFile in the order it appears in the command.
 //
-// We deliberately fail closed in three places. (1) If the command is
-// not valid Bash (parser error) this returns (nil, false) — silently
-// treating malformed input as a no-op write would let an attacker
-// construct a heredoc the parser rejects but Codex's actual shell
-// accepts. (2) If a cat statement has a heredoc but no extractable
-// target path (e.g. `cat <<EOF > $(some_cmd)`), that single write is
-// dropped from the result but the rest of the command's writes are
-// still reported, and ok stays true as long as at least one well-formed
-// write was found. (3) If a tee statement has a heredoc but ANY of its
-// target paths can't be cleanly extracted, the entire statement is
-// dropped — partial coverage of a multi-target tee is the exact
-// confused-deputy bypass we're trying to prevent, so we'd rather hand
-// the raw command to the unified bridge's fallback than report a
-// subset of writes. Callers that need a stricter posture should layer
-// their own checks; the unified bridge then surfaces the raw command
-// through the existing fallback path.
+// We deliberately fall back to the raw command in three places. (1) If
+// the command has heredoc syntax but is not valid Bash, a real shell may
+// still have completed earlier writes before the syntax error. (2) If a
+// write target requires shell evaluation, such as `$HOME/.env`,
+// reporting the surface token as FilePath would invite path policies to
+// validate before canonicalizing. (3) If a tee statement has ANY target
+// path that can't be cleanly extracted, partial coverage of the remaining
+// targets is worse than raw fallback because callers reasonably assume a
+// successful parse reported every write. In all three cases this returns
+// ok=true with no PatchFiles so the unified bridge dispatches its
+// fallback event instead of silently returning PostToolOK.
 func ParseBashRedirectWrite(command string) ([]PatchFile, bool) {
 	// Cheap pre-check: every heredoc-style write contains `<<`. This
 	// keeps the parser allocation off the hot path for plain Bash
@@ -81,36 +78,60 @@ func ParseBashRedirectWrite(command string) ([]PatchFile, bool) {
 
 	file, err := syntax.NewParser().Parse(strings.NewReader(command), "")
 	if err != nil {
-		return nil, false
+		return nil, true
 	}
 
 	var files []PatchFile
+	needsFallback := false
 	syntax.Walk(file, func(node syntax.Node) bool {
+		if bin, ok := node.(*syntax.BinaryCmd); ok {
+			switch patches, status := bashRedirectWriteFromPipeline(command, bin); status {
+			case writeFound:
+				files = append(files, patches...)
+			case writeFallback:
+				needsFallback = true
+			}
+			return true
+		}
 		stmt, ok := node.(*syntax.Stmt)
 		if !ok {
 			return true
 		}
-		if patches, ok := bashRedirectWriteFromStmt(command, stmt); ok {
+		switch patches, status := bashRedirectWriteFromStmt(command, stmt); status {
+		case writeFound:
 			files = append(files, patches...)
+		case writeFallback:
+			needsFallback = true
 		}
 		return true
 	})
+	if needsFallback {
+		return nil, true
+	}
 	if len(files) == 0 {
 		return nil, false
 	}
 	return files, true
 }
 
+type bashWriteStatus int
+
+const (
+	writeNone bashWriteStatus = iota
+	writeFound
+	writeFallback
+)
+
 // bashRedirectWriteFromStmt extracts one PatchFile per write target from
 // stmt if its primary command is a recognised heredoc-style file write
 // (cat or tee). Most statements yield a single PatchFile, but `tee
 // FILE1 FILE2 …` produces one PatchFile per target so every write goes
-// through the per-file policy pipeline. Any other shape returns
-// ok=false so syntax.Walk can quietly skip it.
-func bashRedirectWriteFromStmt(command string, stmt *syntax.Stmt) ([]PatchFile, bool) {
+// through the per-file policy pipeline. Unsupported write-looking shapes
+// return writeFallback so the caller can surface the raw command.
+func bashRedirectWriteFromStmt(command string, stmt *syntax.Stmt) ([]PatchFile, bashWriteStatus) {
 	call, ok := stmt.Cmd.(*syntax.CallExpr)
 	if !ok || len(call.Args) == 0 {
-		return nil, false
+		return nil, writeNone
 	}
 	switch call.Args[0].Lit() {
 	case "cat":
@@ -118,7 +139,38 @@ func bashRedirectWriteFromStmt(command string, stmt *syntax.Stmt) ([]PatchFile, 
 	case "tee":
 		return teeRedirectWrite(command, stmt, call)
 	}
-	return nil, false
+	return nil, writeNone
+}
+
+// bashRedirectWriteFromPipeline handles `cat <<EOF | tee FILE`. The cat
+// heredoc and tee path operands belong to separate statements, so neither
+// same-statement parser can see the full source-to-sink write.
+func bashRedirectWriteFromPipeline(command string, bin *syntax.BinaryCmd) ([]PatchFile, bashWriteStatus) {
+	if bin.Op != syntax.Pipe && bin.Op != syntax.PipeAll {
+		return nil, writeNone
+	}
+	catStmt, teeStmt := bin.X, bin.Y
+	catCall, ok := catStmt.Cmd.(*syntax.CallExpr)
+	if !ok || len(catCall.Args) == 0 || catCall.Args[0].Lit() != "cat" {
+		return nil, writeNone
+	}
+	teeCall, ok := teeStmt.Cmd.(*syntax.CallExpr)
+	if !ok || len(teeCall.Args) == 0 || teeCall.Args[0].Lit() != "tee" {
+		return nil, writeNone
+	}
+	hdoc, status := singleHeredoc(catStmt)
+	if status != writeFound {
+		return nil, status
+	}
+	body, ok := heredocBodyContent(command, hdoc)
+	if !ok {
+		return nil, writeFallback
+	}
+	paths, status := teeTargetPaths(teeCall)
+	if status != writeFound {
+		return nil, status
+	}
+	return patchFilesForPaths(paths, body), writeFound
 }
 
 // catRedirectWrite handles `cat <<EOF > FILE` and `cat > FILE <<EOF`.
@@ -139,13 +191,13 @@ func bashRedirectWriteFromStmt(command string, stmt *syntax.Stmt) ([]PatchFile, 
 // unmonitored. `&>` (RdrAll) and `&>>` (AppAll) combine stdout+stderr
 // to one file; that file IS a real write target, so we treat them
 // like stdout-bound RdrOut/AppOut.
-func catRedirectWrite(command string, stmt *syntax.Stmt) ([]PatchFile, bool) {
+func catRedirectWrite(command string, stmt *syntax.Stmt) ([]PatchFile, bashWriteStatus) {
 	var hdoc, out *syntax.Redirect
 	for _, r := range stmt.Redirs {
 		switch r.Op {
 		case syntax.Hdoc, syntax.DashHdoc:
 			if hdoc != nil {
-				return nil, false
+				return nil, writeFallback
 			}
 			hdoc = r
 		case syntax.RdrOut, syntax.AppOut:
@@ -158,15 +210,15 @@ func catRedirectWrite(command string, stmt *syntax.Stmt) ([]PatchFile, bool) {
 		}
 	}
 	if hdoc == nil || out == nil {
-		return nil, false
+		return nil, writeNone
 	}
-	path := wordText(command, out.Word)
-	if path == "" {
-		return nil, false
+	path, ok := wordText(out.Word)
+	if !ok || path == "" {
+		return nil, writeFallback
 	}
 	body, ok := heredocBodyContent(command, hdoc)
 	if !ok {
-		return nil, false
+		return nil, writeFallback
 	}
 	return []PatchFile{{
 		Operation: "add",
@@ -175,7 +227,7 @@ func catRedirectWrite(command string, stmt *syntax.Stmt) ([]PatchFile, bool) {
 			OldString: "",
 			NewString: body,
 		}},
-	}}, true
+	}}, writeFound
 }
 
 // teeRedirectWrite handles `tee [-a] FILE… [< /dev/null] <<EOF`. tee
@@ -195,7 +247,49 @@ func catRedirectWrite(command string, stmt *syntax.Stmt) ([]PatchFile, bool) {
 // target word doesn't yield a usable path string — partial coverage is
 // worse than no coverage, because callers reasonably assume that a
 // successful parse means every write was reported.
-func teeRedirectWrite(command string, stmt *syntax.Stmt, call *syntax.CallExpr) ([]PatchFile, bool) {
+func teeRedirectWrite(command string, stmt *syntax.Stmt, call *syntax.CallExpr) ([]PatchFile, bashWriteStatus) {
+	paths, status := teeTargetPaths(call)
+	if status != writeFound {
+		return nil, status
+	}
+	var hdoc *syntax.Redirect
+	for _, r := range stmt.Redirs {
+		if r.Op != syntax.Hdoc && r.Op != syntax.DashHdoc {
+			continue
+		}
+		if hdoc != nil {
+			return nil, writeFallback
+		}
+		hdoc = r
+	}
+	if hdoc == nil {
+		return nil, writeNone
+	}
+	body, ok := heredocBodyContent(command, hdoc)
+	if !ok {
+		return nil, writeFallback
+	}
+	return patchFilesForPaths(paths, body), writeFound
+}
+
+func singleHeredoc(stmt *syntax.Stmt) (*syntax.Redirect, bashWriteStatus) {
+	var hdoc *syntax.Redirect
+	for _, r := range stmt.Redirs {
+		if r.Op != syntax.Hdoc && r.Op != syntax.DashHdoc {
+			continue
+		}
+		if hdoc != nil {
+			return nil, writeFallback
+		}
+		hdoc = r
+	}
+	if hdoc == nil {
+		return nil, writeNone
+	}
+	return hdoc, writeFound
+}
+
+func teeTargetPaths(call *syntax.CallExpr) ([]string, bashWriteStatus) {
 	var paths []string
 	endOfOptions := false
 	for _, arg := range call.Args[1:] {
@@ -210,32 +304,19 @@ func teeRedirectWrite(command string, stmt *syntax.Stmt, call *syntax.CallExpr) 
 				}
 			}
 		}
-		path := wordText(command, arg)
-		if path == "" {
-			return nil, false
+		path, ok := wordText(arg)
+		if !ok || path == "" {
+			return nil, writeFallback
 		}
 		paths = append(paths, path)
 	}
 	if len(paths) == 0 {
-		return nil, false
+		return nil, writeNone
 	}
-	var hdoc *syntax.Redirect
-	for _, r := range stmt.Redirs {
-		if r.Op != syntax.Hdoc && r.Op != syntax.DashHdoc {
-			continue
-		}
-		if hdoc != nil {
-			return nil, false
-		}
-		hdoc = r
-	}
-	if hdoc == nil {
-		return nil, false
-	}
-	body, ok := heredocBodyContent(command, hdoc)
-	if !ok {
-		return nil, false
-	}
+	return paths, writeFound
+}
+
+func patchFilesForPaths(paths []string, body string) []PatchFile {
 	files := make([]PatchFile, 0, len(paths))
 	for _, path := range paths {
 		files = append(files, PatchFile{
@@ -247,7 +328,7 @@ func teeRedirectWrite(command string, stmt *syntax.Stmt, call *syntax.CallExpr) 
 			}},
 		})
 	}
-	return files, true
+	return files
 }
 
 // redirectsStdout reports whether r targets file descriptor 1 (stdout).
@@ -267,24 +348,26 @@ func redirectsStdout(r *syntax.Redirect) bool {
 	return false
 }
 
-// wordText returns a usable string representation of a syntax.Word —
-// preferring the unquoted literal value when all parts reduce to plain
-// text, otherwise falling back to the verbatim source slice. The
-// fallback matters for paths like `$HOME/.env` where downstream policy
-// still needs to see the surface text even though Bash would expand it.
-func wordText(command string, w *syntax.Word) string {
+// wordText returns a usable string representation of a syntax.Word only
+// when every part is literal after quote removal. Words requiring shell
+// evaluation must go through raw fallback; otherwise downstream path
+// policies could validate a token like `$HOME/.env` before Bash expands it.
+func wordText(w *syntax.Word) (string, bool) {
 	if w == nil {
-		return ""
+		return "", false
 	}
-	if lit, ok := wordToLiteral(w); ok {
-		return lit
+	if wordHasTildeExpansion(w) {
+		return "", false
 	}
-	start := int(w.Pos().Offset())
-	end := int(w.End().Offset())
-	if start < 0 || end > len(command) || start >= end {
-		return ""
+	return wordToLiteral(w)
+}
+
+func wordHasTildeExpansion(w *syntax.Word) bool {
+	if len(w.Parts) == 0 {
+		return false
 	}
-	return command[start:end]
+	lit, ok := w.Parts[0].(*syntax.Lit)
+	return ok && strings.HasPrefix(lit.Value, "~")
 }
 
 // wordToLiteral returns w's effective literal text if every part is a

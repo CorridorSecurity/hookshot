@@ -116,24 +116,24 @@ func TestStopDecision_Helpers(t *testing.T) {
 
 func TestExecutionContext_IsMCP(t *testing.T) {
 	tests := []struct {
-		name   string
+		name     string
 		execType ExecutionType
-		want   bool
+		want     bool
 	}{
 		{
-			name:   "ExecutionMCP returns true",
+			name:     "ExecutionMCP returns true",
 			execType: ExecutionMCP,
-			want:   true,
+			want:     true,
 		},
 		{
-			name:   "ExecutionShell returns false",
+			name:     "ExecutionShell returns false",
 			execType: ExecutionShell,
-			want:   false,
+			want:     false,
 		},
 		{
-			name:   "ExecutionTool returns false",
+			name:     "ExecutionTool returns false",
 			execType: ExecutionTool,
-			want:   false,
+			want:     false,
 		},
 	}
 
@@ -1240,6 +1240,56 @@ func TestCodexPostToolUse_BashNonApplyPatchCommandSkipped(t *testing.T) {
 	}
 }
 
+func TestCodexPostToolUse_BashMalformedHeredocFallsBackToRawCommand(t *testing.T) {
+	ClearHandlers()
+	defer ClearHandlers()
+
+	var got []FileEditContext
+	OnAfterFileEdit(func(ctx FileEditContext) FileEditDecision {
+		got = append(got, ctx)
+		return FileEditOK()
+	})
+
+	cmd := "cat <<'EOF' > a.txt\\nA\\nEOF\\ncat <<'EOF' > b.txt\\nB\\n"
+	stdin := `{"session_id":"s","tool_name":"Bash","tool_input":{"command":"` + cmd + `"},"cwd":"/repo"}`
+	runHandlerWithStdin(t, "codex-post-tool-use", stdin)
+
+	if len(got) != 1 {
+		t.Fatalf("handler invocations = %d, want raw fallback invocation; got=%+v", len(got), got)
+	}
+	if got[0].FilePath != "" {
+		t.Errorf("FilePath = %q, want empty for raw fallback", got[0].FilePath)
+	}
+	if len(got[0].Edits) != 1 || !strings.Contains(got[0].Edits[0].NewString, "cat <<'EOF' > b.txt") {
+		t.Errorf("fallback edit = %+v, want raw Bash command", got[0].Edits)
+	}
+}
+
+func TestCodexPostToolUse_BashExpandedPathFallsBackToRawCommand(t *testing.T) {
+	ClearHandlers()
+	defer ClearHandlers()
+
+	var got []FileEditContext
+	OnAfterFileEdit(func(ctx FileEditContext) FileEditDecision {
+		got = append(got, ctx)
+		return FileEditOK()
+	})
+
+	cmd := "cat <<'EOF' > $HOME/.ssh/authorized_keys\\nkey\\nEOF"
+	stdin := `{"session_id":"s","tool_name":"Bash","tool_input":{"command":"` + cmd + `"},"cwd":"/repo"}`
+	runHandlerWithStdin(t, "codex-post-tool-use", stdin)
+
+	if len(got) != 1 {
+		t.Fatalf("handler invocations = %d, want raw fallback invocation; got=%+v", len(got), got)
+	}
+	if got[0].FilePath != "" {
+		t.Errorf("FilePath = %q, want empty for raw fallback", got[0].FilePath)
+	}
+	if len(got[0].Edits) != 1 || !strings.Contains(got[0].Edits[0].NewString, "$HOME/.ssh/authorized_keys") {
+		t.Errorf("fallback edit = %+v, want raw Bash command", got[0].Edits)
+	}
+}
+
 func TestCodexPostToolUse_BashCatHeredocWriteDispatches(t *testing.T) {
 	// Codex 0.130.0+ routes greenfield writes through a plain Bash
 	// `cat <<'EOF' > FILE … EOF` heredoc rather than apply_patch or any
@@ -1275,6 +1325,33 @@ func TestCodexPostToolUse_BashCatHeredocWriteDispatches(t *testing.T) {
 	wantEdit := FileEdit{OldString: "", NewString: "hello world"}
 	if len(got[0].Edits) != 1 || got[0].Edits[0] != wantEdit {
 		t.Errorf("Edits = %+v, want [%+v]", got[0].Edits, wantEdit)
+	}
+}
+
+func TestCodexPostToolUse_BashCatPipeTeeDispatches(t *testing.T) {
+	ClearHandlers()
+	defer ClearHandlers()
+
+	var got []FileEditContext
+	OnAfterFileEdit(func(ctx FileEditContext) FileEditDecision {
+		got = append(got, ctx)
+		return FileEditOK()
+	})
+
+	cmd := "cat <<'EOF' | tee allowed.txt ../../.ssh/authorized_keys >/dev/null\\nattacker-controlled\\nEOF"
+	stdin := `{"session_id":"s","tool_name":"Bash","tool_input":{"command":"` + cmd + `"},"cwd":"/repo"}`
+	runHandlerWithStdin(t, "codex-post-tool-use", stdin)
+
+	if len(got) != 2 {
+		t.Fatalf("handler invocations = %d, want 2 tee targets; got=%+v", len(got), got)
+	}
+	if got[0].FilePath != "allowed.txt" || got[1].FilePath != "../../.ssh/authorized_keys" {
+		t.Fatalf("paths = [%q, %q], want allowed.txt and ../../.ssh/authorized_keys", got[0].FilePath, got[1].FilePath)
+	}
+	for _, ctx := range got {
+		if len(ctx.Edits) != 1 || ctx.Edits[0].NewString != "attacker-controlled" {
+			t.Errorf("Edits = %+v, want tee body", ctx.Edits)
+		}
 	}
 }
 
