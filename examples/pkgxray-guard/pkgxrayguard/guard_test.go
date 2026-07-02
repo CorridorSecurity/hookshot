@@ -137,6 +137,31 @@ func itoa(n int) string {
 	return string(b)
 }
 
+func TestValidateInstallRef(t *testing.T) {
+	ok := []string{"lodash", "npm:lodash", "@scope/pkg", "@scope/pkg@1.2.3", "left-pad@1.3.0", "npm:some-package@1.2.3-rc.1"}
+	for _, ref := range ok {
+		if err := validateInstallRef(ref); err != nil {
+			t.Errorf("validateInstallRef(%q) = %v, want nil", ref, err)
+		}
+	}
+	bad := []string{"", "   ", "-rf", "--format", "lodash\nrm", "a\x00b"}
+	for _, ref := range bad {
+		if err := validateInstallRef(ref); err == nil {
+			t.Errorf("validateInstallRef(%q) = nil, want error", ref)
+		}
+	}
+}
+
+// A ref that could be read as a CLI flag is refused before any exec, surfaced
+// as Review rather than shelled out.
+func TestCheckRejectsFlagLikeRef(t *testing.T) {
+	g := Guard{Bin: fakePkgxray(t, `{"decision":"allow","report":{"summary":"","findings":[]}}`, 0)}
+	res := g.Check(context.Background(), InstallSpec{Ref: "--format"})
+	if res.Verdict != Review {
+		t.Fatalf("Check(--format) verdict = %s, want review (refused before exec)", res.Verdict)
+	}
+}
+
 func TestCheckBlock(t *testing.T) {
 	out := `{"decision":"block","report":{"summary":"1 high-severity finding","findings":[` +
 		`{"severity":"high","category":"credential-access","rationale":"reads ~/.aws/credentials near a network sink","file":"lib/.telemetry.js"},` +

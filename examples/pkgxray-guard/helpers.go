@@ -22,6 +22,10 @@ func isDependencyManifest(filePath string) bool {
 
 // runCLI runs the pkgxray CLI and returns its combined output and exit code.
 func runCLI(bin string, args ...string) (string, int) {
+	// #nosec G204 -- bin is the operator-configured pkgxray CLI (PKGXRAY_BIN or a
+	// PATH lookup of "pkgxray"); args are fixed subcommands plus a repo-local
+	// manifest path the hook resolved. No shell is involved (args are a []string
+	// argv), so the variable target cannot inject a command (CWE-78).
 	cmd := exec.Command(bin, args...)
 	out, err := cmd.CombinedOutput()
 	if err == nil {

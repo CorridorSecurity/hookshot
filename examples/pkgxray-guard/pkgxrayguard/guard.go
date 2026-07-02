@@ -93,7 +93,20 @@ func (g Guard) Check(ctx context.Context, spec InstallSpec) Result {
 	cctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
+	// Defense-in-depth before spawning the CLI. exec.CommandContext passes args
+	// as a []string argv — no shell is involved — so spec.Ref cannot inject a
+	// command (CWE-78 is not reachable here). We still reject a ref that could be
+	// misread as a CLI flag (argument injection) or carries control bytes, as a
+	// sanitizer checkpoint on the untrusted-input → subprocess path.
+	if err := validateInstallRef(spec.Ref); err != nil {
+		return Result{Spec: spec, Verdict: Review, Summary: "refusing to scan an install ref: " + err.Error()}
+	}
+
 	args := append([]string{"guard", spec.Ref, "--format", "json"}, g.ExtraArgs...)
+	// #nosec G204 -- bin is the operator-configured pkgxray CLI (PKGXRAY_BIN, or a
+	// PATH lookup of "pkgxray"), never attacker-controlled; args are a fixed argv
+	// with a validated ref and no shell, so the variable target cannot inject a
+	// command. Spawning the pkgxray CLI is this gate's sole purpose.
 	cmd := exec.CommandContext(cctx, bin, args...)
 	// pkgxray reads PKGXRAY_CACHE_URL from its environment (github.js routes
 	// upstream fetches through the cache server). A child inherits our env, but
@@ -127,6 +140,26 @@ func (g Guard) Check(ctx context.Context, spec InstallSpec) Result {
 		res.Err = errors.New("pkgxray produced no verdict")
 	}
 	return res
+}
+
+// validateInstallRef guards the install reference before it is handed to the
+// pkgxray CLI as an argv element. exec.* never invokes a shell, so this is
+// defense-in-depth, not the primary control: it blocks a ref that could be read
+// as a flag (argument injection) or that carries control bytes. Registry refs
+// the parser produces (name, @scope/name, name@version) always pass.
+func validateInstallRef(ref string) error {
+	if strings.TrimSpace(ref) == "" {
+		return errors.New("empty install ref")
+	}
+	if strings.HasPrefix(ref, "-") {
+		return errors.New("install ref must not begin with '-'")
+	}
+	for _, r := range ref {
+		if r < 0x20 || r == 0x7f {
+			return errors.New("install ref contains a control character")
+		}
+	}
+	return nil
 }
 
 func verdictFromDecision(decision string) Verdict {
