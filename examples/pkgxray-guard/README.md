@@ -140,3 +140,5 @@ jobs:
   complete sandbox.
 - `pkgxray guard` reaches the network (registry/OSV/GitHub). Budget ~1s/package;
   tune with `PKGXRAY_GUARD_ARGS` (e.g. `--no-github-diff --no-github`).
+
+<!-- ci: exercise go.yml against examples/pkgxray-guard -->
