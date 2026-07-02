@@ -132,6 +132,7 @@ hookshot rewrites an `ask` decision to a deny (Codex has no approval prompt), so
 examples/pkgxray-guard/
 ├── main.go              hookshot handler registration + env config
 ├── helpers.go           lockfile detection + pkgxray CLI runner
+├── e2e-smoke.sh         real binary + real pkgxray end-to-end smoke test
 ├── pkgxrayguard/        pure, stdlib-only, unit-tested core
 │   ├── parse.go         shell command → []InstallSpec
 │   ├── guard.go         run `pkgxray guard`, map verdict + reasons
@@ -158,6 +159,11 @@ go test ./pkgxrayguard/...
 # Simulate a Claude PreToolUse event (deny path depends on the real package):
 echo '{"tool_name":"Bash","tool_input":{"command":"npm install left-pad"}}' \
   | ./pkgxray-guard claude-pre-tool-use
+
+# End-to-end smoke test: builds the binary and drives it through the real chain
+# (deterministic deny/ask/allow cases + one live `pkgxray` call). Needs pkgxray
+# on PATH for the live case; deterministic cases run offline.
+./e2e-smoke.sh
 ```
 
 ## CI
