@@ -93,6 +93,8 @@ For Codex, `apply_patch` is classified as `ExecutionTool` (not `ExecutionShell` 
 
 Codex does not currently enforce `permissionDecision: "ask"`. To avoid a silent fail-open, the unified bridge rewrites `AskExecution(...)` decisions to a `Deny` on Codex; on every other platform `Ask` still surfaces an approval prompt as before.
 
+On Claude, a bare `AllowExecution()` (no reason) serializes to an empty `{}` pass-through rather than `permissionDecision: "allow"`. Emitting `"allow"` would silently auto-approve the tool call and bypass Claude's own permission prompts; the empty pass-through lets Claude's normal permission flow proceed. Use `AllowExecutionWithReason(...)` if you deliberately want to auto-approve with an explicit reason.
+
 ### ExecutionType
 
 ```go

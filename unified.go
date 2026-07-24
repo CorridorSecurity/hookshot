@@ -296,7 +296,13 @@ func OnBeforeExecution(handler ExecutionHandler) {
 				if decision.Reason != "" {
 					return claude.Allow(decision.Reason)
 				}
-				return claude.AllowSilent()
+				// A bare Allow (no reason) must NOT emit
+				// permissionDecision: "allow". Doing so silently
+				// auto-approves the tool call and bypasses Claude's own
+				// permission prompts (see COR-8956). Return an empty {}
+				// pass-through instead so the normal permission flow
+				// proceeds.
+				return claude.PassThrough()
 			}
 			if decision.Ask {
 				return claude.Ask(decision.Reason)

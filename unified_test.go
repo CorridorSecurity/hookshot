@@ -800,6 +800,53 @@ func TestOnPromptSubmit_CursorPopulatesCwd(t *testing.T) {
 }
 
 // =============================================================================
+// Claude-specific behavior tests
+// =============================================================================
+
+func TestClaudePreToolUse_AllowSerializesToEmpty(t *testing.T) {
+	// A bare Allow (no reason) on Claude must NOT emit
+	// permissionDecision: "allow". Emitting "allow" silently auto-approves
+	// the tool call and bypasses Claude's own permission prompts (COR-8956).
+	// The bridge must serialize a bare Allow to an empty {} pass-through so
+	// the normal permission flow proceeds.
+	ClearHandlers()
+	defer ClearHandlers()
+
+	OnBeforeExecution(func(ctx ExecutionContext) ExecutionDecision {
+		return AllowExecution()
+	})
+
+	// Capture stdout to assert on the emitted JSON.
+	stdinR, stdinW, _ := os.Pipe()
+	stdinW.Write([]byte(`{"session_id":"s","tool_name":"Bash","tool_input":{"command":"echo hi"},"cwd":"/tmp"}`))
+	stdinW.Close()
+	stdoutR, stdoutW, _ := os.Pipe()
+	origStdin, origStdout := os.Stdin, os.Stdout
+	os.Stdin, os.Stdout = stdinR, stdoutW
+	defer func() {
+		stdoutW.Close()
+		os.Stdin, os.Stdout = origStdin, origStdout
+	}()
+
+	handlers["claude-pre-tool-use"]()
+	stdoutW.Close()
+
+	var buf bytes.Buffer
+	buf.ReadFrom(stdoutR)
+	got := strings.TrimSpace(buf.String())
+
+	if got != "{}" {
+		t.Errorf("Claude bare Allow should serialize to {}, got %q", got)
+	}
+	if strings.Contains(got, "permissionDecision") {
+		t.Errorf("Claude bare Allow must NOT emit permissionDecision, got %q", got)
+	}
+	if strings.Contains(got, "suppressOutput") {
+		t.Errorf("Claude bare Allow must NOT emit suppressOutput, got %q", got)
+	}
+}
+
+// =============================================================================
 // Codex-specific behavior tests
 // =============================================================================
 
