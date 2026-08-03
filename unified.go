@@ -299,7 +299,7 @@ func OnBeforeExecution(handler ExecutionHandler) {
 				// A bare Allow (no reason) must NOT emit
 				// permissionDecision: "allow". Doing so silently
 				// auto-approves the tool call and bypasses Claude's own
-				// permission prompts (see COR-8956). Return an empty {}
+				// permission prompts. Return an empty {}
 				// pass-through instead so the normal permission flow
 				// proceeds.
 				return claude.PassThrough()
@@ -333,8 +333,11 @@ func OnBeforeExecution(handler ExecutionHandler) {
 				}
 				return cursor.Allow()
 			}
+			// Cursor does not enforce permission "ask": a headless session
+			// executes it silently, so an Ask decision would fail open. Fail
+			// closed by denying, matching the Codex posture below.
 			if decision.Ask {
-				return cursor.Ask(decision.Reason)
+				return cursor.Deny(decision.Reason, decision.Reason)
 			}
 			return cursor.Deny(decision.Reason, decision.Reason)
 		})
@@ -343,11 +346,17 @@ func OnBeforeExecution(handler ExecutionHandler) {
 	// Cursor beforeMCPExecution
 	Register("cursor-before-mcp", func() {
 		Run(func(input cursor.BeforeMCPExecutionInput) cursor.BeforeExecutionOutput {
+			// An empty ToolInput must stay nil: a zero-length json.RawMessage
+			// fails json.Marshal, while a nil one marshals as null.
+			var toolInput json.RawMessage
+			if input.ToolInput != "" {
+				toolInput = json.RawMessage(input.ToolInput)
+			}
 			ctx := ExecutionContext{
 				Platform:  PlatformCursor,
 				Type:      ExecutionMCP,
 				ToolName:  input.ToolName,
-				ToolInput: json.RawMessage(input.ToolInput),
+				ToolInput: toolInput,
 				ServerURL: input.URL,
 				Command:   input.Command, // For local MCP servers (command-based)
 				Cwd:       cursorWorkspaceRoot(input.WorkspaceRoots),
@@ -361,8 +370,9 @@ func OnBeforeExecution(handler ExecutionHandler) {
 				}
 				return cursor.Allow()
 			}
+			// See the shell handler above: Cursor does not enforce "ask".
 			if decision.Ask {
-				return cursor.Ask(decision.Reason)
+				return cursor.Deny(decision.Reason, decision.Reason)
 			}
 			return cursor.Deny(decision.Reason, decision.Reason)
 		})
