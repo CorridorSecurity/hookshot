@@ -784,10 +784,21 @@ func OnAfterFileEdit(handler FileEditHandler) {
 			// envelope, then reduces per-file decisions to one
 			// PostToolUseOutput. fallbackCommand is used as the
 			// NewString of a single synthetic FileEdit when the patch
-			// could not be parsed (len(files)==0), so policies still
-			// see a Codex PostToolUse event rather than nothing.
-			dispatchPatch := func(files []codex.PatchFile, fallbackCommand string) codex.PostToolUseOutput {
-				if len(files) == 0 {
+			// could not be fully parsed, so policies still see a
+			// Codex PostToolUse event rather than nothing.
+			dispatchPatch := func(files []codex.PatchFile, fallbackCommand string, includeFallback bool) codex.PostToolUseOutput {
+				var (
+					blockReasons []string
+					contexts     []string
+				)
+				recordDecision := func(decision FileEditDecision) {
+					if decision.Block {
+						blockReasons = append(blockReasons, decision.Reason)
+					} else if decision.Context != "" {
+						contexts = append(contexts, decision.Context)
+					}
+				}
+				invokeFallback := func() {
 					ctx := FileEditContext{
 						Platform:      PlatformCodex,
 						SessionID:     input.SessionID,
@@ -795,20 +806,9 @@ func OnAfterFileEdit(handler FileEditHandler) {
 						Edits:         []FileEdit{{OldString: "", NewString: fallbackCommand}},
 						RawClaudeCode: &input,
 					}
-					decision := handler(ctx)
-					if decision.Block {
-						return codex.PostToolBlock(decision.Reason)
-					}
-					if decision.Context != "" {
-						return codex.PostToolContext(decision.Context)
-					}
-					return codex.PostToolOK()
+					recordDecision(handler(ctx))
 				}
 
-				var (
-					blockReasons []string
-					contexts     []string
-				)
 				invoke := func(filePath string, f codex.PatchFile) {
 					edits := make([]FileEdit, 0, len(f.Edits))
 					for _, e := range f.Edits {
@@ -823,12 +823,7 @@ func OnAfterFileEdit(handler FileEditHandler) {
 						Cwd:           input.Cwd,
 						RawClaudeCode: &input,
 					}
-					decision := handler(ctx)
-					if decision.Block {
-						blockReasons = append(blockReasons, decision.Reason)
-					} else if decision.Context != "" {
-						contexts = append(contexts, decision.Context)
-					}
+					recordDecision(handler(ctx))
 				}
 				for _, f := range files {
 					// Always invoke for the declared source path.
@@ -843,6 +838,9 @@ func OnAfterFileEdit(handler FileEditHandler) {
 					if f.NewFilePath != "" && f.NewFilePath != f.FilePath {
 						invoke(f.NewFilePath, f)
 					}
+				}
+				if len(files) == 0 || includeFallback {
+					invokeFallback()
 				}
 				if len(blockReasons) > 0 {
 					return codex.PostToolBlock(strings.Join(blockReasons, "\n"))
@@ -893,7 +891,7 @@ func OnAfterFileEdit(handler FileEditHandler) {
 					Command string `json:"command"`
 				}
 				json.Unmarshal(input.ToolInput, &applyInput)
-				return dispatchPatch(codex.ParseApplyPatch(applyInput.Command), applyInput.Command)
+				return dispatchPatch(codex.ParseApplyPatch(applyInput.Command), applyInput.Command, false)
 
 			case "Bash":
 				// Codex routes file operations through Bash in two
@@ -914,17 +912,19 @@ func OnAfterFileEdit(handler FileEditHandler) {
 				// because it's the higher-fidelity shape (per-hunk
 				// old/new) when both detectors would match, then fall
 				// back to the heredoc-write detector. Non-edit Bash
-				// commands short-circuit at the second `if !ok` check
-				// without paying for either full parse pass.
+				// commands short-circuit at the second `if !ok` check.
+				// Unsupported or unsafe write-like heredoc shapes return
+				// ok=true with an empty file list so dispatchPatch sends
+				// the raw command to the handler instead of dropping it.
 				var bashInput struct {
 					Command string `json:"command"`
 				}
 				json.Unmarshal(input.ToolInput, &bashInput)
 				if files, ok := codex.ParseApplyPatchFromBash(bashInput.Command); ok {
-					return dispatchPatch(files, bashInput.Command)
+					return dispatchPatch(files, bashInput.Command, false)
 				}
-				if files, ok := codex.ParseBashRedirectWrite(bashInput.Command); ok {
-					return dispatchPatch(files, bashInput.Command)
+				if files, fallback, ok := codex.ParseBashRedirectWriteWithFallback(bashInput.Command); ok {
+					return dispatchPatch(files, bashInput.Command, fallback)
 				}
 				return codex.PostToolOK()
 

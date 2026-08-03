@@ -89,6 +89,7 @@ type PreRunCommandOutput struct {
 ```go
 func AllowCommand() PreRunCommandOutput
 func DenyCommand(message string) PreRunCommandOutput
+func BlockCommand(message string) (PreRunCommandOutput, error)
 func AskCommand(message string) PreRunCommandOutput
 ```
 
@@ -100,7 +101,7 @@ Cascade uses exit code 2 to block actions, so pre-hooks should use `RunE`. When 
 hookshot.Register("cascade-pre-run-command", func() {
     hookshot.RunE(func(input cascade.PreRunCommandInput) (cascade.PreRunCommandOutput, error) {
         if strings.Contains(input.ToolInfo.CommandLine, "rm -rf /") {
-            return cascade.PreRunCommandOutput{}, fmt.Errorf("Dangerous command blocked")
+            return cascade.BlockCommand("Dangerous command blocked")
         }
         return cascade.AllowCommand(), nil
     })
@@ -181,6 +182,7 @@ type PreWriteCodeOutput struct {
 ```go
 func AllowWrite() PreWriteCodeOutput
 func DenyWrite(message string) PreWriteCodeOutput
+func BlockWrite(message string) (PreWriteCodeOutput, error)
 func AskWrite(message string) PreWriteCodeOutput
 ```
 
@@ -190,7 +192,7 @@ func AskWrite(message string) PreWriteCodeOutput
 hookshot.Register("cascade-pre-write-code", func() {
     hookshot.RunE(func(input cascade.PreWriteCodeInput) (cascade.PreWriteCodeOutput, error) {
         if strings.HasSuffix(input.ToolInfo.FilePath, ".env") {
-            return cascade.PreWriteCodeOutput{}, fmt.Errorf("Cannot write to .env files")
+            return cascade.BlockWrite("Cannot write to .env files")
         }
         return cascade.AllowWrite(), nil
     })
@@ -261,6 +263,7 @@ type PreReadCodeOutput struct {
 ```go
 func AllowRead() PreReadCodeOutput
 func DenyRead(message string) PreReadCodeOutput
+func BlockRead(message string) (PreReadCodeOutput, error)
 func AskRead(message string) PreReadCodeOutput
 ```
 
@@ -270,7 +273,7 @@ func AskRead(message string) PreReadCodeOutput
 hookshot.Register("cascade-pre-read-code", func() {
     hookshot.RunE(func(input cascade.PreReadCodeInput) (cascade.PreReadCodeOutput, error) {
         if strings.Contains(input.ToolInfo.FilePath, "secrets") {
-            return cascade.PreReadCodeOutput{}, fmt.Errorf("Cannot read secret files")
+            return cascade.BlockRead("Cannot read secret files")
         }
         return cascade.AllowRead(), nil
     })
@@ -343,6 +346,7 @@ type PreMCPToolUseOutput struct {
 ```go
 func AllowMCP() PreMCPToolUseOutput
 func DenyMCP(message string) PreMCPToolUseOutput
+func BlockMCP(message string) (PreMCPToolUseOutput, error)
 func AskMCP(message string) PreMCPToolUseOutput
 ```
 
@@ -352,7 +356,7 @@ func AskMCP(message string) PreMCPToolUseOutput
 hookshot.Register("cascade-pre-mcp-tool-use", func() {
     hookshot.RunE(func(input cascade.PreMCPToolUseInput) (cascade.PreMCPToolUseOutput, error) {
         if input.ToolInfo.MCPServerName == "blocked-server" {
-            return cascade.PreMCPToolUseOutput{}, fmt.Errorf("MCP server not allowed")
+            return cascade.BlockMCP("MCP server not allowed")
         }
         return cascade.AllowMCP(), nil
     })
@@ -425,6 +429,7 @@ type PreUserPromptOutput struct {
 ```go
 func AllowPrompt() PreUserPromptOutput
 func BlockPrompt(message string) PreUserPromptOutput
+func BlockPromptWithError(message string) (PreUserPromptOutput, error)
 ```
 
 ### Example
@@ -433,7 +438,7 @@ func BlockPrompt(message string) PreUserPromptOutput
 hookshot.Register("cascade-pre-user-prompt", func() {
     hookshot.RunE(func(input cascade.PreUserPromptInput) (cascade.PreUserPromptOutput, error) {
         if strings.Contains(input.ToolInfo.UserPrompt, "api_key=") {
-            return cascade.PreUserPromptOutput{}, fmt.Errorf("Don't include API keys in prompts")
+            return cascade.BlockPromptWithError("Don't include API keys in prompts")
         }
         return cascade.AllowPrompt(), nil
     })

@@ -130,8 +130,8 @@ func TestParseBashRedirectWrite_NoHeredoc_PlainBash(t *testing.T) {
 		"ls -la",
 		"git diff",
 		"cat README.md",
-		"echo hello > greet.txt",     // simple redirect (no heredoc) — out of scope
-		"printf 'hi' > greet.txt",    // not handled here
+		"echo hello > greet.txt",  // simple redirect (no heredoc) — out of scope
+		"printf 'hi' > greet.txt", // not handled here
 		"apply_patch <<'PATCH'\n*** Begin Patch\n*** Add File: a\n+x\n*** End Patch\nPATCH",
 	}
 	for _, cmd := range tests {
@@ -142,11 +142,16 @@ func TestParseBashRedirectWrite_NoHeredoc_PlainBash(t *testing.T) {
 }
 
 func TestParseBashRedirectWrite_HeredocMissingTerminator(t *testing.T) {
-	// Without the closing EOF line we can't trust the body — bail.
+	// Without the closing EOF line we can't trust the body. Return ok=true
+	// with no structured files so the bridge dispatches raw fallback.
 	cmd := "cat <<'EOF' > greet.txt\nhello world\n"
 
-	if _, ok := ParseBashRedirectWrite(cmd); ok {
-		t.Errorf("expected ok=false for heredoc missing terminator")
+	files, ok := ParseBashRedirectWrite(cmd)
+	if !ok {
+		t.Fatalf("expected ok=true so the bridge can dispatch raw fallback")
+	}
+	if len(files) != 0 {
+		t.Errorf("expected no structured files for heredoc missing terminator; got %+v", files)
 	}
 }
 
@@ -368,8 +373,12 @@ func TestParseBashRedirectWrite_TeeQuotedPathEscapesContainment(t *testing.T) {
 func TestParseBashRedirectWrite_InvalidBash_FailsClosed(t *testing.T) {
 	cmd := "cat <<'EOF' > greet.txt\nhello\n" // missing terminator
 
-	if files, ok := ParseBashRedirectWrite(cmd); ok {
-		t.Errorf("expected ok=false on invalid Bash; got %+v", files)
+	files, ok := ParseBashRedirectWrite(cmd)
+	if !ok {
+		t.Fatalf("expected ok=true so the bridge can dispatch raw fallback")
+	}
+	if len(files) != 0 {
+		t.Errorf("expected no structured files on invalid Bash; got %+v", files)
 	}
 }
 
@@ -382,8 +391,12 @@ func TestParseBashRedirectWrite_PartiallyMalformed_FailsClosed(t *testing.T) {
 	// command. The first write must not slip through.
 	cmd := "cat <<'EOF' > a.txt\nA\nEOF\ncat <<'EOF' > b.txt\nB\n"
 
-	if files, ok := ParseBashRedirectWrite(cmd); ok {
-		t.Errorf("expected ok=false when later heredoc lacks terminator; got %+v", files)
+	files, ok := ParseBashRedirectWrite(cmd)
+	if !ok {
+		t.Fatalf("expected ok=true so the bridge can dispatch raw fallback")
+	}
+	if len(files) != 0 {
+		t.Errorf("expected no structured files when later heredoc lacks terminator; got %+v", files)
 	}
 }
 
@@ -411,6 +424,98 @@ func TestParseBashRedirectWrite_TeeMultipleTargets_AllReported(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("ParseBashRedirectWrite =\n  %+v\nwant\n  %+v", got, want)
+	}
+}
+
+func TestParseBashRedirectWrite_CatPipeTeeReported(t *testing.T) {
+	cmd := "cat <<'EOF' | tee allowed.txt ../../.ssh/authorized_keys\nattacker-controlled\nEOF"
+
+	got, ok := ParseBashRedirectWrite(cmd)
+	if !ok {
+		t.Fatalf("ParseBashRedirectWrite(...) ok = false; want true")
+	}
+	want := []PatchFile{
+		{Operation: "add", FilePath: "allowed.txt", Edits: []PatchEdit{{OldString: "", NewString: "attacker-controlled"}}},
+		{Operation: "add", FilePath: "../../.ssh/authorized_keys", Edits: []PatchEdit{{OldString: "", NewString: "attacker-controlled"}}},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("ParseBashRedirectWrite =\n  %+v\nwant\n  %+v", got, want)
+	}
+}
+
+func TestParseBashRedirectWrite_CatPipeTeeStdoutRedirectReported(t *testing.T) {
+	cmd := "cat <<'EOF' | tee allowed.txt > ../../.ssh/authorized_keys\nattacker-controlled\nEOF"
+
+	got, ok := ParseBashRedirectWrite(cmd)
+	if !ok {
+		t.Fatalf("ParseBashRedirectWrite(...) ok = false; want true")
+	}
+	want := []PatchFile{
+		{Operation: "add", FilePath: "allowed.txt", Edits: []PatchEdit{{OldString: "", NewString: "attacker-controlled"}}},
+		{Operation: "add", FilePath: "../../.ssh/authorized_keys", Edits: []PatchEdit{{OldString: "", NewString: "attacker-controlled"}}},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("ParseBashRedirectWrite =\n  %+v\nwant\n  %+v", got, want)
+	}
+}
+
+func TestParseBashRedirectWrite_CatPipeTeeStdoutOnlyReported(t *testing.T) {
+	cmd := "cat <<'EOF' | tee > out.txt\nbody\nEOF"
+
+	got, ok := ParseBashRedirectWrite(cmd)
+	if !ok {
+		t.Fatalf("ParseBashRedirectWrite(...) ok = false; want true")
+	}
+	want := []PatchFile{
+		{Operation: "add", FilePath: "out.txt", Edits: []PatchEdit{{OldString: "", NewString: "body"}}},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("ParseBashRedirectWrite =\n  %+v\nwant\n  %+v", got, want)
+	}
+}
+
+func TestParseBashRedirectWrite_NonLiteralTargetUsesFallback(t *testing.T) {
+	tests := []struct {
+		name string
+		cmd  string
+	}{
+		{
+			name: "environment expansion",
+			cmd:  "cat <<'EOF' > $HOME/.ssh/authorized_keys\nkey\nEOF",
+		},
+		{
+			name: "tilde expansion",
+			cmd:  "cat <<'EOF' > ~/secret.txt\nsecret\nEOF",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			files, ok := ParseBashRedirectWrite(tt.cmd)
+			if !ok {
+				t.Fatalf("expected ok=true so the bridge can dispatch raw fallback")
+			}
+			if len(files) != 0 {
+				t.Fatalf("files = %+v, want raw fallback with no structured files", files)
+			}
+		})
+	}
+}
+
+func TestParseBashRedirectWrite_MixedParsedAndFallbackPreservesFiles(t *testing.T) {
+	cmd := "cat <<'EOF' > .env\nTOKEN=secret\nEOF\ncat <<'EOF' > $HOME/out.txt\nbody\nEOF"
+
+	files, fallback, ok := ParseBashRedirectWriteWithFallback(cmd)
+	if !ok {
+		t.Fatalf("ParseBashRedirectWriteWithFallback(...) ok = false; want true")
+	}
+	if !fallback {
+		t.Fatalf("fallback = false, want true")
+	}
+	want := []PatchFile{
+		{Operation: "add", FilePath: ".env", Edits: []PatchEdit{{OldString: "", NewString: "TOKEN=secret"}}},
+	}
+	if !reflect.DeepEqual(files, want) {
+		t.Errorf("files =\n  %+v\nwant\n  %+v", files, want)
 	}
 }
 
@@ -544,7 +649,11 @@ func TestParseBashRedirectWrite_CatRdrAll(t *testing.T) {
 func TestParseBashRedirectWrite_TeeUnparseableTarget_FailsClosed(t *testing.T) {
 	cmd := "tee \"\" foo.txt <<'EOF'\nbody\nEOF"
 
-	if files, ok := ParseBashRedirectWrite(cmd); ok {
-		t.Errorf("expected ok=false when a tee target is empty; got %+v", files)
+	files, ok := ParseBashRedirectWrite(cmd)
+	if !ok {
+		t.Fatalf("expected ok=true so the bridge can dispatch raw fallback")
+	}
+	if len(files) != 0 {
+		t.Errorf("expected raw fallback when a tee target is empty; got %+v", files)
 	}
 }

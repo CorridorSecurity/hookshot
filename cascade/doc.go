@@ -27,35 +27,35 @@
 //
 // PreRunCommand hooks control shell command execution:
 //
-//	hookshot.Run(func(input cascade.PreRunCommandInput) cascade.PreRunCommandOutput {
+//	hookshot.RunE(func(input cascade.PreRunCommandInput) (cascade.PreRunCommandOutput, error) {
 //	    // Block dangerous commands
 //	    if strings.Contains(input.ToolInfo.CommandLine, "rm -rf") {
-//	        return cascade.Deny("Dangerous command blocked")
+//	        return cascade.BlockCommand("Dangerous command blocked")
 //	    }
-//	    return cascade.Allow()
+//	    return cascade.AllowCommand(), nil
 //	})
 //
 // # PreWriteCode Hooks
 //
 // PreWriteCode hooks control file modifications:
 //
-//	hookshot.Run(func(input cascade.PreWriteCodeInput) cascade.PreWriteCodeOutput {
+//	hookshot.RunE(func(input cascade.PreWriteCodeInput) (cascade.PreWriteCodeOutput, error) {
 //	    // Block writes to sensitive files
 //	    if strings.Contains(input.ToolInfo.FilePath, ".env") {
-//	        return cascade.Deny("Cannot modify environment files")
+//	        return cascade.BlockWrite("Cannot modify environment files")
 //	    }
-//	    return cascade.Allow()
+//	    return cascade.AllowWrite(), nil
 //	})
 //
 // # PreUserPrompt Hooks
 //
 // PreUserPrompt hooks validate or modify user prompts:
 //
-//	hookshot.Run(func(input cascade.PreUserPromptInput) cascade.PreUserPromptOutput {
+//	hookshot.RunE(func(input cascade.PreUserPromptInput) (cascade.PreUserPromptOutput, error) {
 //	    if containsSecrets(input.ToolInfo.UserPrompt) {
-//	        return cascade.BlockPrompt("Please don't include secrets in prompts")
+//	        return cascade.BlockPromptWithError("Please don't include secrets in prompts")
 //	    }
-//	    return cascade.AllowPrompt()
+//	    return cascade.AllowPrompt(), nil
 //	})
 //
 // # Helper Functions
@@ -64,7 +64,8 @@
 //
 // Pre-hooks (PreRunCommand, PreWriteCode, PreReadCode, PreMCPToolUse):
 //   - [Allow]: Permit the action
-//   - [Deny]: Block the action with a reason
+//   - [Deny]: Build deny JSON for the action
+//   - [Block]: Build deny JSON plus the error required for [hookshot.RunE]
 //   - [Ask]: Prompt user to confirm (where supported)
 //
 // PreUserPrompt:
