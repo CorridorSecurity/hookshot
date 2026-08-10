@@ -1046,10 +1046,7 @@ func TestCodexPreToolUse_ApplyPatchPopulatesCommand(t *testing.T) {
 }
 
 func TestCodexPreToolUse_MCPClassifiedAsMCP(t *testing.T) {
-	// Verifies that MCP tools reaching the codex-pre-tool-use handler are
-	// classified as ExecutionMCP. (Reaching the handler at all also
-	// requires the installer to include mcp__.* in the matcher; see
-	// TestCodexInstaller_MatcherIncludesMCP for that side.)
+	// MCP tools reaching codex-pre-tool-use are classified as ExecutionMCP.
 	ClearHandlers()
 	defer ClearHandlers()
 

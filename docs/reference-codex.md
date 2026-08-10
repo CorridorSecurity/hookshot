@@ -29,8 +29,8 @@ Hook commands live in `~/.codex/hooks.json` (or an inline `[hooks]` table in
 }
 ```
 
-`hookshot install --codex --binary /path/to/my-hooks` will generate this for
-you.
+Add these entries to the existing `hooks` object so other hook registrations
+remain intact.
 
 > **Why `mcp__.*` is in the matcher.** Codex passes MCP tool names to
 > PreToolUse / PostToolUse using the `mcp__server__tool` convention.
@@ -186,10 +186,10 @@ include `Bash` (not just `apply_patch`):
 "PostToolUse": [{ "matcher": "Bash|apply_patch|mcp__.*", /* … */ }]
 ```
 
-`hookshot install --codex` writes this matcher by default. If you
-configured hooks before adding the `Bash` token, you'll see zero
-`afterFileEdit` events for any Codex session that edits or creates
-files — that's the symptom that motivated this bridge.
+Include this matcher when configuring Codex hooks. If you configured hooks
+before adding the `Bash` token, you'll see zero `afterFileEdit` events for any
+Codex session that edits or creates files — that's the symptom that motivated
+this bridge.
 
 ### `apply_patch` via Bash heredoc
 

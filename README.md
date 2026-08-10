@@ -65,13 +65,6 @@ go build -o my-hooks .
 hookshot build -all -output ./dist
 ```
 
-## Installing Hooks
-
-```bash
-# Install to Claude Code and Cursor config files
-hookshot install --binary /path/to/my-hooks
-```
-
 ## Configuration
 
 ### Claude Code (`~/.claude/settings.json`)

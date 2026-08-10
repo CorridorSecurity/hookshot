@@ -76,13 +76,12 @@
 //	    return claude.Allow("Validated"), nil
 //	})
 //
-// # Building and Installing
+// # Building
 //
-// Use the hookshot CLI for building and installing:
+// Use the hookshot CLI for cross-platform builds:
 //
 //	go install github.com/CorridorSecurity/hookshot/cmd/hookshot@latest
 //	hookshot build -all -output ./dist
-//	hookshot install --binary ./dist/darwin-arm64/my-hooks
 //
 // # Configuration
 //
